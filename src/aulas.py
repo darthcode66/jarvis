@@ -1,6 +1,6 @@
 """
-Grade horária FAM - Ciência da Computação (Noturno)
-Turma 57-05-B · Bloco 2 - Sala 073 - 1º piso
+Grade horária FAM - dinâmica por usuário (carregada do banco).
+Fallback: grade vazia se usuário não tem grade cadastrada.
 """
 
 from datetime import datetime, timedelta
@@ -15,6 +15,8 @@ from telegram.ext import (
     ContextTypes,
 )
 
+import db
+
 TZ = ZoneInfo("America/Sao_Paulo")
 
 DIAS_NOME = {
@@ -27,34 +29,48 @@ DIAS_NOME = {
     6: "Domingo",
 }
 
-# Grade: dia da semana (0=seg) -> lista de blocos de aula
-GRADE = {
-    0: [  # Segunda
+SIGLA_DIA = {0: "SEG", 1: "TER", 2: "QUA", 3: "QUI", 4: "SEX", 5: "SAB"}
+
+# Grade padrão (Pedro) — usada como fallback se usuário não tem grade no banco
+GRADE_PADRAO = {
+    0: [
         {"materia": "Prog. Orientada a Objetos", "prof": "Evandro Santaclara", "inicio": "19:00", "fim": "22:30"},
     ],
-    1: [  # Terça
+    1: [
         {"materia": "Engenharia de Software", "prof": "Lucas Parizotto", "inicio": "19:00", "fim": "20:40"},
         {"materia": "Ativ. Extensão IV", "prof": "Marcio Veleda", "inicio": "20:50", "fim": "22:30"},
         {"materia": "Tópicos Integradores I", "prof": "Murilo Fujita", "inicio": "20:50", "fim": "22:30"},
     ],
-    2: [  # Quarta
+    2: [
         {"materia": "Física Geral e Experimental", "prof": "Henrique Gimenes", "inicio": "19:00", "fim": "22:30"},
     ],
-    3: [],  # Quinta - sem aula
-    4: [  # Sexta
+    3: [],
+    4: [
         {"materia": "Redes de Computadores", "prof": "Marcio Taglietta", "inicio": "19:00", "fim": "22:30"},
     ],
-    5: [  # Sábado
+    5: [
         {"materia": "Ativ. Complementar IV", "prof": "", "inicio": "", "fim": ""},
     ],
 }
 
-SIGLA_DIA = {0: "SEG", 1: "TER", 2: "QUA", 3: "QUI", 4: "SEX", 5: "SAB"}
+# Alias para compatibilidade com imports antigos (gemini.py, famus.py)
+GRADE = GRADE_PADRAO
 
 
-def _formatar_dia(dia: int, data: datetime | None = None) -> str:
+def _load_grade(chat_id: int) -> dict:
+    """Carrega grade do banco. Converte chaves string→int. Fallback: GRADE_PADRAO."""
+    grade_raw = db.get_grade(chat_id)
+    if not grade_raw:
+        return GRADE_PADRAO
+    # Chaves JSON são strings ("0","1"…), converter para int
+    return {int(k): v for k, v in grade_raw.items()}
+
+
+def _formatar_dia(dia: int, data: datetime | None = None, grade: dict | None = None) -> str:
     """Formata as aulas de um dia."""
-    aulas = GRADE.get(dia)
+    if grade is None:
+        grade = GRADE_PADRAO
+    aulas = grade.get(dia)
     nome = DIAS_NOME[dia]
 
     if data:
@@ -76,26 +92,27 @@ def _formatar_dia(dia: int, data: datetime | None = None) -> str:
     return "\n".join(linhas)
 
 
-def _aulas_hoje() -> str:
+def _aulas_hoje(grade: dict | None = None) -> str:
     agora = datetime.now(TZ)
-    return _formatar_dia(agora.weekday(), agora)
+    return _formatar_dia(agora.weekday(), agora, grade)
 
 
-def _aulas_amanha() -> str:
+def _aulas_amanha(grade: dict | None = None) -> str:
     amanha = datetime.now(TZ) + timedelta(days=1)
-    return _formatar_dia(amanha.weekday(), amanha)
+    return _formatar_dia(amanha.weekday(), amanha, grade)
 
 
-def _aulas_semana() -> str:
+def _aulas_semana(grade: dict | None = None) -> str:
+    if grade is None:
+        grade = GRADE_PADRAO
     hoje = datetime.now(TZ)
-    # Acha a segunda-feira desta semana
     seg = hoje - timedelta(days=hoje.weekday())
 
     linhas = ["📅 Semana\n"]
     for i in range(6):  # seg a sab
         data = seg + timedelta(days=i)
         dia = data.weekday()
-        aulas = GRADE.get(dia)
+        aulas = grade.get(dia)
 
         nome = SIGLA_DIA.get(dia, "")
         if not aulas:
@@ -122,20 +139,25 @@ def _menu_aula() -> InlineKeyboardMarkup:
 
 
 async def cmd_aula(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(_aulas_hoje(), reply_markup=_menu_aula())
+    chat_id = update.effective_chat.id
+    grade = _load_grade(chat_id)
+    await update.message.reply_text(_aulas_hoje(grade), reply_markup=_menu_aula())
 
 
 async def callback_aula(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
 
+    chat_id = query.message.chat_id
+    grade = _load_grade(chat_id)
+
     opcao = query.data
     if opcao == "aula_hoje":
-        texto = _aulas_hoje()
+        texto = _aulas_hoje(grade)
     elif opcao == "aula_amanha":
-        texto = _aulas_amanha()
+        texto = _aulas_amanha(grade)
     elif opcao == "aula_semana":
-        texto = _aulas_semana()
+        texto = _aulas_semana(grade)
     else:
         return
 

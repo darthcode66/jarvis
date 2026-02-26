@@ -1,8 +1,8 @@
-# Arquitetura Tecnica — Jarvis Bot
+# Arquitetura Tecnica — Famus Bot
 
 ## Visao Geral
 
-O Jarvis e um bot Telegram monolitico em Python que combina multiplas fontes de dados e camadas de processamento de linguagem natural para atuar como assistente pessoal.
+O Famus e um bot Telegram monolitico em Python que combina multiplas fontes de dados e camadas de processamento de linguagem natural para atuar como assistente pessoal.
 
 ## Camadas do Sistema
 
@@ -29,7 +29,7 @@ O Jarvis e um bot Telegram monolitico em Python que combina multiplas fontes de 
 - **Formato**: Formato Gemini nativo (contents com parts)
 - **Conversao**: Historico unificado (user/assistant) e convertido para formato Gemini (user/model) antes do envio
 
-#### Nivel 3: Jarvis NLP (fallback local)
+#### Nivel 3: Famus NLP (fallback local)
 - **Zero dependencias externas**
 - **Pattern matching**: Palavras-chave normalizadas (sem acentos, lowercase)
 - **Intencoes detectadas**: saudacao, agradecimento, onibus, aula, atividades, ajuda
@@ -65,16 +65,16 @@ O Jarvis e um bot Telegram monolitico em Python que combina multiplas fontes de 
       - Envia para Groq com system prompt + historico
       - Se Groq falha → tenta Gemini
       - Converte [markdown](links) para <a href>HTML</a>
-   b. Se IA falha → chama jarvis.responder(update, context)
+   b. Se IA falha → chama famus.responder(update, context)
       - Normaliza texto, detecta intencao
       - Gera resposta local
-   c. Se jarvis nao entendeu → mensagem generica "nao entendi"
+   c. Se famus nao entendeu → mensagem generica "nao entendi"
 ```
 
 ## System Prompt da IA
 
 O system prompt inclui:
-1. **Personalidade**: Jarvis — formal, humor acido, sarcasmo sutil
+1. **Personalidade**: Famus — paulista, humor acido, sarcasmo sutil, girias naturais
 2. **Dados do Pedro**: Locais, horarios, curso
 3. **Regras de onibus**: Nunca inventar horarios, usar so dados fornecidos
 4. **Formatacao**: Template obrigatorio com emojis e links Maps
@@ -129,7 +129,7 @@ A IA gera markdown, que passa por `_formatar_para_telegram()`:
 - **Security Group**: Apenas porta 22 (SSH) aberta
 
 ### Servico systemd
-- **Unit file**: `/etc/systemd/system/jarvis.service`
+- **Unit file**: `/etc/systemd/system/famus.service`
 - **Restart**: `always` com `RestartSec=10` — se o bot crashar, reinicia em 10s
 - **WorkingDirectory**: `/home/ubuntu/jarvis/src`
 - **EnvironmentFile**: `/home/ubuntu/jarvis/.env`

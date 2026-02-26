@@ -14,7 +14,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from aulas import GRADE, DIAS_NOME
+import db
+from aulas import DIAS_NOME, _load_grade
 from onibus import HORARIOS
 
 logger = logging.getLogger(__name__)
@@ -36,38 +37,60 @@ MAX_HISTORICO = 20
 # Memória: chat_id -> lista de {"role": "user"|"assistant", "content": str}
 _historico: dict[int, list[dict]] = {}
 
-# Locais do Pedro
-LOCAIS = {
-    "casa": {"nome": "Casa", "bairro": "Jd. da Balsa, Americana-SP"},
-    "trabalho": {"nome": "Trabalho", "bairro": "Vila Sta. Catarina, Americana-SP"},
-    "faculdade": {"nome": "Faculdade (FAM)", "bairro": "Jd. Luciene, Americana-SP"},
-}
+
+def _build_locais(user: dict) -> dict:
+    """Monta dict de locais com base nos dados do usuário."""
+    locais = {
+        "casa": {"nome": "Casa", "bairro": user.get("endereco_casa") or "endereço não informado"},
+        "faculdade": {"nome": "Faculdade (FAM)", "bairro": user.get("endereco_faculdade") or "FAM - Jd. Luciene, Americana-SP"},
+    }
+    if user.get("endereco_trabalho"):
+        locais["trabalho"] = {"nome": "Trabalho", "bairro": user["endereco_trabalho"]}
+    return locais
 
 
-def _local_estimado() -> str:
-    """Estima onde o Pedro está baseado no horário e dia da semana."""
+def _local_estimado(user: dict, grade: dict) -> str:
+    """Estima onde o usuário está baseado no horário e dia da semana."""
     agora = datetime.now(TZ)
     hora = agora.hour + agora.minute / 60
     dia = agora.weekday()
+
+    tem_trabalho = bool(user.get("endereco_trabalho"))
 
     if dia >= 5:
         return "casa"
     if hora < 8:
         return "casa"
-    if hora < 17.5:
-        return "trabalho"
 
-    tem_aula = bool(GRADE.get(dia))
-    if not tem_aula:
-        if hora < 18.5:
+    if tem_trabalho:
+        # Horário de saída do trabalho
+        saida_str = user.get("horario_saida_trabalho") or "18:00"
+        try:
+            parts = saida_str.split(":")
+            saida_hora = int(parts[0]) + int(parts[1]) / 60
+        except (ValueError, IndexError):
+            saida_hora = 18.0
+
+        if hora < saida_hora:
             return "trabalho"
-        return "casa"
 
-    if hora < 19:
-        return "trabalho"
-    if hora < 23:
-        return "faculdade"
-    return "casa"
+        tem_aula = bool(grade.get(dia))
+        if not tem_aula:
+            if hora < saida_hora + 0.5:
+                return "trabalho"
+            return "casa"
+
+        if hora < saida_hora + 1:
+            return "trabalho"
+        if hora < 23:
+            return "faculdade"
+        return "casa"
+    else:
+        # Sem trabalho
+        tem_aula = bool(grade.get(dia))
+        if tem_aula and hora >= 18 and hora < 23:
+            return "faculdade"
+        return "casa"
 
 
 def _maps_link(endereco: str) -> str:
@@ -107,15 +130,16 @@ def _gerar_tabela_horarios() -> str:
 _TABELA_HORARIOS = _gerar_tabela_horarios()
 
 
-def _contexto_dinamico() -> str:
+def _contexto_dinamico(user: dict, grade: dict) -> str:
     """Gera contexto com hora atual, local estimado e próximos ônibus relevantes."""
     agora = datetime.now(TZ)
     dia_semana = agora.weekday()
     amanha_dia = (agora + timedelta(days=1)).weekday()
     hora_str = agora.strftime("%H:%M")
 
-    local = _local_estimado()
-    local_info = LOCAIS[local]
+    locais = _build_locais(user)
+    local = _local_estimado(user, grade)
+    local_info = locais.get(local, {"nome": local, "bairro": "desconhecido"})
 
     rotas_relevantes = {
         "casa": ["casa_trabalho", "casa_faculdade"],
@@ -124,13 +148,17 @@ def _contexto_dinamico() -> str:
     }
     relevantes = rotas_relevantes.get(local, [])
 
+    # Se não tem trabalho, remove rotas de trabalho
+    if not user.get("endereco_trabalho"):
+        relevantes = [r for r in relevantes if "trabalho" not in r]
+
     partes = [
         f"Agora: {agora.strftime('%A, %d/%m/%Y %H:%M')}",
         f"Localização estimada: {local_info['nome']} ({local_info['bairro']})",
     ]
 
     # Aulas hoje
-    aulas_hoje = GRADE.get(dia_semana, [])
+    aulas_hoje = grade.get(dia_semana, [])
     if aulas_hoje:
         partes.append(f"\nAulas hoje ({DIAS_NOME[dia_semana]}):")
         for a in aulas_hoje:
@@ -143,7 +171,7 @@ def _contexto_dinamico() -> str:
         partes.append(f"\nHoje ({DIAS_NOME[dia_semana]}): sem aula")
 
     # Aulas amanhã
-    aulas_amanha = GRADE.get(amanha_dia, [])
+    aulas_amanha = grade.get(amanha_dia, [])
     if aulas_amanha:
         partes.append(f"\nAulas amanhã ({DIAS_NOME[amanha_dia]}):")
         for a in aulas_amanha:
@@ -182,22 +210,58 @@ def _contexto_dinamico() -> str:
     return "\n".join(partes)
 
 
-SYSTEM_PROMPT = """\
-Você é o Jarvis, assistente pessoal do Pedro no Telegram. Pedro é estudante de Ciência da Computação (5º semestre, noturno) na FAM (Faculdade de Americana) e trabalha durante o dia na Vila Sta. Catarina, Americana-SP.
+def _build_grade_text(grade: dict) -> str:
+    """Monta texto da grade semanal para o system prompt."""
+    siglas = {0: "SEG", 1: "TER", 2: "QUA", 3: "QUI", 4: "SEX", 5: "SAB"}
+    linhas = []
+    for dia in range(6):
+        aulas = grade.get(dia, [])
+        sigla = siglas[dia]
+        if not aulas:
+            linhas.append(f"- {sigla}: Sem aula")
+            continue
+        partes_dia = []
+        for a in aulas:
+            horario = f"{a['inicio']}-{a['fim']}" if a['inicio'] else "horário variável"
+            parte = f"{a['materia']} ({horario})"
+            if a['prof']:
+                parte += f" - Prof. {a['prof']}"
+            partes_dia.append(parte)
+        linhas.append(f"- {sigla}: {' | '.join(partes_dia)}")
+    return "\n".join(linhas)
+
+
+def build_system_prompt(user: dict, grade: dict) -> str:
+    """Constrói system prompt personalizado por usuário."""
+    nome = user.get("nome", "usuário")
+    casa = user.get("endereco_casa") or "não informado"
+    trabalho = user.get("endereco_trabalho") or ""
+    faculdade = user.get("endereco_faculdade") or "FAM - Jd. Luciene, Americana-SP"
+    horario_saida = user.get("horario_saida_trabalho") or "18:00"
+
+    grade_text = _build_grade_text(grade)
+
+    dados_usuario = f"""Dados de {nome}:
+- Mora em: {casa}"""
+    if trabalho:
+        dados_usuario += f"\n- Trabalha em: {trabalho}"
+        dados_usuario += f"\n- Sai do trabalho às {horario_saida} (considere ~15 min para chegar ao ponto de ônibus)"
+    dados_usuario += f"\n- Estuda na {faculdade}"
+
+    return f"""\
+Você é o Famus, assistente pessoal de {nome} no Telegram. {nome} é estudante na FAM (Faculdade de Americana).
 
 Personalidade:
-- Formal e educado, mas com um leve toque de humor ácido e sarcasmo sutil (estilo Jarvis do Iron Man)
-- Sempre prestativo, mas pode fazer observações espirituosas quando apropriado
-- NUNCA comece com saudação (Olá, Oi, Bom dia, etc) a menos que o Pedro cumprimente primeiro
-- Se o Pedro cumprimentar, retribua com uma observação espirituosa antes de responder
+- Paulista raiz: usa gírias naturalmente (mano, firmeza, suave, da hora, tá ligado, mó, trampo, busão) mas sem forçar a barra
+- Humor ácido e sarcasmo sutil — solta umas piadas mas sempre ajuda no final
+- Tom de amigo paulista que manja tudo da FAM e das rotas de busão
+- Mantém um mínimo de formalidade pra não perder credibilidade (não é bagunça, é estilo)
+- NUNCA comece com saudação (Olá, Oi, Bom dia, etc) a menos que {nome} cumprimente primeiro
+- Se {nome} cumprimentar, retribua com uma observação espirituosa antes de responder
 - Você tem memória da conversa atual — lembre-se do que foi dito
 - Você NÃO pode alterar dados permanentemente. Se pedirem, diga que anota na conversa mas para alteração permanente deve falar com o desenvolvedor
 
-Dados do Pedro:
-- Sai do trabalho às 18:00 (considere ~15 min para chegar ao ponto de ônibus, ou seja, só consegue embarcar a partir de ~18:15)
-- Mora no Jd. da Balsa, Americana-SP
-- Trabalha na Vila Sta. Catarina, Americana-SP
-- Estuda na FAM, Jd. Luciene, Americana-SP
+{dados_usuario}
 
 Regras sobre ônibus:
 - TODOS os horários de TODAS as rotas estão na TABELA COMPLETA DE HORÁRIOS abaixo
@@ -215,25 +279,15 @@ FORMATAÇÃO (OBRIGATÓRIO — siga exatamente):
 
 - Liste cada ônibus como um bloco separado com linha em branco entre eles
 - Máximo 3 opções, a menos que peçam mais
-- Exemplo real:
 
-🚌 L.220 — 18:25 → 18:56
-📍 Embarque: R. Rui Barbosa, 261
-[📍 Rota a pé](https://www.google.com/maps/dir/?api=1&destination=R.%20Rui%20Barbosa%2C%20261%2C%20Americana%20-%20SP&travelmode=walking)
-
-Grade semanal (Turma 57-05-B · Bloco 2 - Sala 073 - 1º piso):
-- SEG: Prog. Orientada a Objetos (19:00-22:30) - Prof. Evandro Santaclara
-- TER: Engenharia de Software (19:00-20:40) - Prof. Lucas Parizotto | Ativ. Extensão IV (20:50-22:30) - Prof. Marcio Veleda | Tópicos Integradores I (20:50-22:30) - Prof. Murilo Fujita
-- QUA: Física Geral e Experimental (19:00-22:30) - Prof. Henrique Gimenes
-- QUI: Sem aula
-- SEX: Redes de Computadores (19:00-22:30) - Prof. Marcio Taglietta
-- SAB: Ativ. Complementar IV (horário variável)
+Grade semanal:
+{grade_text}
 
 Atividades da FAM:
-- Se o Pedro perguntar sobre atividades/tarefas, os dados estarão no contexto (quando consultados)
+- Se {nome} perguntar sobre atividades/tarefas, os dados estarão no contexto (quando consultados)
 - Se não houver dados, informe que pode consultar e sugira perguntar novamente
 
-Comandos: /aula, /onibus, /atividades, /help, /clear
+Comandos: /aula, /onibus, /atividades, /help, /clear, /config
 
 ========== TABELA COMPLETA DE HORÁRIOS ==========
 """ + _TABELA_HORARIOS
@@ -258,9 +312,16 @@ def _perguntar_groq(mensagem: str, chat_id: int, extra_contexto: str | None) -> 
     if not GROQ_API_KEY:
         return None
 
-    contexto = _contexto_dinamico()
+    user = db.get_user(chat_id)
+    if not user:
+        return None
+
+    grade = _load_grade(chat_id)
+    contexto = _contexto_dinamico(user, grade)
     if extra_contexto:
         contexto += "\n\n" + extra_contexto
+
+    system_prompt = build_system_prompt(user, grade)
 
     if chat_id not in _historico:
         _historico[chat_id] = []
@@ -272,7 +333,7 @@ def _perguntar_groq(mensagem: str, chat_id: int, extra_contexto: str | None) -> 
         hist[:] = hist[-MAX_HISTORICO:]
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT + "\n\n--- CONTEXTO ATUAL ---\n" + contexto},
+        {"role": "system", "content": system_prompt + "\n\n--- CONTEXTO ATUAL ---\n" + contexto},
         *hist,
     ]
 
@@ -326,9 +387,16 @@ def _perguntar_gemini(mensagem: str, chat_id: int, extra_contexto: str | None) -
     if not GEMINI_API_KEY:
         return None
 
-    contexto = _contexto_dinamico()
+    user = db.get_user(chat_id)
+    if not user:
+        return None
+
+    grade = _load_grade(chat_id)
+    contexto = _contexto_dinamico(user, grade)
     if extra_contexto:
         contexto += "\n\n" + extra_contexto
+
+    system_prompt = build_system_prompt(user, grade)
 
     if chat_id not in _historico:
         _historico[chat_id] = []
@@ -344,7 +412,7 @@ def _perguntar_gemini(mensagem: str, chat_id: int, extra_contexto: str | None) -
 
     payload = {
         "system_instruction": {
-            "parts": [{"text": SYSTEM_PROMPT + "\n\n--- CONTEXTO ATUAL ---\n" + contexto}]
+            "parts": [{"text": system_prompt + "\n\n--- CONTEXTO ATUAL ---\n" + contexto}]
         },
         "contents": gemini_hist,
         "generationConfig": {

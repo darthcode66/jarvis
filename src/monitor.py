@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from aulas import registrar_handlers as registrar_aulas
+from cadastro import cadastro_handler, cmd_config, cmd_resetar
+import db
 from fam_scraper import FAMScraper
 from onibus import registrar_handlers as registrar_onibus
 from storage import Storage
@@ -30,8 +32,6 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-FAM_LOGIN = os.getenv('FAM_LOGIN')
-FAM_SENHA = os.getenv('FAM_SENHA')
 
 storage = Storage()
 
@@ -39,9 +39,28 @@ storage = Storage()
 # ── Scraping FAM ─────────────────────────────────────────────────────────────
 
 
-def _scrape_atividades():
-    """Executa scraping do portal FAM (blocking — roda via run_in_executor)."""
-    scraper = FAMScraper(FAM_LOGIN, FAM_SENHA, headless=True)
+def _scrape_atividades(chat_id: int | None = None):
+    """Executa scraping do portal FAM (blocking — roda via run_in_executor).
+    Se chat_id fornecido, usa credenciais do banco. Senão, fallback pro .env.
+    """
+    fam_login = None
+    fam_senha = None
+
+    if chat_id:
+        creds = db.get_credentials(chat_id)
+        if creds:
+            fam_login, fam_senha = creds
+
+    # Fallback: .env
+    if not fam_login:
+        fam_login = os.getenv('FAM_LOGIN')
+        fam_senha = os.getenv('FAM_SENHA')
+
+    if not fam_login or not fam_senha:
+        logger.error("Sem credenciais FAM para scraping")
+        return None
+
+    scraper = FAMScraper(fam_login, fam_senha, headless=True)
     try:
         if not scraper.fazer_login():
             logger.error("Falha no login do portal FAM")
@@ -78,10 +97,16 @@ def _formatar_atividade(at, idx):
 
 async def cmd_atividades(update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /atividades — consulta atividades do portal FAM."""
+    chat_id = update.effective_chat.id
+
+    if not db.is_registered(chat_id):
+        await update.message.reply_text("Primeiro faça seu cadastro com /start 👆")
+        return
+
     msg = await update.message.reply_text("🔄 Consultando portal FAM...")
 
     loop = asyncio.get_event_loop()
-    atividades = await loop.run_in_executor(None, _scrape_atividades)
+    atividades = await loop.run_in_executor(None, _scrape_atividades, chat_id)
 
     if atividades is None:
         await msg.edit_text("❌ Falha ao acessar o portal FAM.")
@@ -116,14 +141,24 @@ async def cmd_atividades(update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    # Inicializa banco de dados (cria tabelas + seed do Pedro)
+    db.init_db()
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Handlers de ônibus e aulas
+    # IMPORTANTE: ConversationHandler de cadastro PRIMEIRO (tem prioridade no /start)
+    app.add_handler(cadastro_handler)
+
+    # Handlers de ônibus e aulas (inclui /start fallback para cadastrados)
     registrar_onibus(app)
     registrar_aulas(app)
 
     # Handler de atividades FAM
     app.add_handler(CommandHandler("atividades", cmd_atividades))
+
+    # Handlers de config/resetar
+    app.add_handler(CommandHandler("config", cmd_config))
+    app.add_handler(CommandHandler("resetar", cmd_resetar))
 
     logger.info("Bot rodando...")
     app.run_polling()

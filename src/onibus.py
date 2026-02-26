@@ -18,6 +18,8 @@ from telegram.ext import (
     filters,
 )
 
+import db
+
 TZ = ZoneInfo("America/Sao_Paulo")
 
 HORARIOS = {
@@ -410,9 +412,26 @@ def menu_keyboard(route=None, showing_all=False):
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "🤖 Fala Pedro! Escolhe o trajeto:", reply_markup=menu_keyboard()
-    )
+    """
+    /start — se cadastrado, mostra menu. Se não, sugere cadastro.
+    NOTA: O ConversationHandler de cadastro tem prioridade; este handler
+    só é atingido se o ConversationHandler não capturou (i.e., user já cadastrado).
+    """
+    chat_id = update.effective_chat.id
+    user = db.get_user(chat_id)
+
+    if user and user["onboarding_completo"]:
+        nome = user["nome"]
+        await update.message.reply_text(
+            f"🤖 Fala {nome}! Escolhe o trajeto:", reply_markup=menu_keyboard()
+        )
+    else:
+        # Não deveria chegar aqui (ConversationHandler captura antes),
+        # mas como fallback:
+        await update.message.reply_text(
+            "👋 Bem-vindo ao FAMus! Vamos fazer seu cadastro.\n"
+            "Mande /start novamente para iniciar."
+        )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -432,6 +451,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "⚙️ *Geral*\n"
         "/start — menu com botões\n"
         "/help — esta mensagem\n"
+        "/config — ver/editar seus dados\n"
         "/clear — limpar conversa"
     )
     await update.message.reply_text(texto, parse_mode="Markdown")
@@ -508,11 +528,19 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def mensagem_generica(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+
+    # Gate de cadastro: se não registrado, manda cadastrar
+    if not db.is_registered(chat_id):
+        await update.message.reply_text(
+            "Primeiro faça seu cadastro com /start 👆"
+        )
+        return
+
     from gemini import perguntar
-    from jarvis import responder
+    from famus import responder
 
     texto = update.message.text
-    chat_id = update.message.chat_id
     extra = None
     loading_msg = None
 
@@ -523,7 +551,7 @@ async def mensagem_generica(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         try:
             from monitor import _scrape_atividades
             loop = asyncio.get_event_loop()
-            atividades = await loop.run_in_executor(None, _scrape_atividades)
+            atividades = await loop.run_in_executor(None, _scrape_atividades, chat_id)
             if atividades:
                 partes = ["ATIVIDADES DO PORTAL FAM:"]
                 for i, at in enumerate(atividades, 1):
@@ -564,6 +592,8 @@ async def mensagem_generica(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 def registrar_handlers(app: Application) -> None:
     """Registra todos os handlers de ônibus na Application."""
+    # NOTA: /start agora é tratado pelo ConversationHandler de cadastro (registrado em monitor.py)
+    # Este cmd_start só é chamado como fallback para usuários já cadastrados
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("clear", cmd_clear))

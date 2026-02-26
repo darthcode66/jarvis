@@ -1,5 +1,5 @@
 """
-Jarvis — responde mensagens em linguagem natural usando pattern matching.
+Famus — responde mensagens em linguagem natural usando pattern matching.
 Sem API, sem custo. Detecta intenção por palavras-chave.
 """
 
@@ -11,7 +11,8 @@ from zoneinfo import ZoneInfo
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from aulas import GRADE, DIAS_NOME, _formatar_dia, _menu_aula, _aulas_semana
+import db
+from aulas import DIAS_NOME, _formatar_dia, _menu_aula, _aulas_semana, _load_grade
 from onibus import (
     HORARIOS,
     menu_keyboard,
@@ -48,14 +49,15 @@ def _tem_alguma(texto: str, *palavras) -> bool:
     return any(p in texto for p in palavras)
 
 
-def _saudacao() -> str:
+def _saudacao(nome: str = "") -> str:
     hora = datetime.now(TZ).hour
+    sufixo = f", {nome}" if nome else ""
     if hora < 12:
-        return random.choice(["Bom dia!", "Bom dia, Pedro!", "Dia!"])
+        return random.choice([f"Bom dia{sufixo}!", f"Dia{sufixo}!"])
     elif hora < 18:
-        return random.choice(["Boa tarde!", "Boa tarde, Pedro!", "Tarde!"])
+        return random.choice([f"Boa tarde{sufixo}!", f"Tarde{sufixo}!"])
     else:
-        return random.choice(["Boa noite!", "Boa noite, Pedro!", "Noite!"])
+        return random.choice([f"Boa noite{sufixo}!", f"Noite{sufixo}!"])
 
 
 # ── Detecção de intenção ─────────────────────────────────────────────────────
@@ -104,10 +106,8 @@ def detectar_intencao(texto_original: str):
         # "ir pro trabalho" / "chegar no trabalho" → destino trabalho
         if _tem_alguma(t, "ir", "chegar", "vou", "indo", "voltar"):
             if tem_trabalho and tem_casa:
-                # "ir pra casa" depois de mencionar trabalho → trabalho_casa
                 pos_ir = max(t.rfind("ir"), t.rfind("vou"), t.rfind("indo"), t.rfind("chegar"), t.rfind("voltar"))
                 if pos_ir >= 0:
-                    # O que vem DEPOIS de "ir" é o destino
                     depois = t[pos_ir:]
                     if "casa" in depois:
                         return ("onibus", {"rota": "trabalho_casa"})
@@ -182,6 +182,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     Retorna True se respondeu, False se não entendeu.
     """
     texto = update.message.text
+    chat_id = update.effective_chat.id
     resultado = detectar_intencao(texto)
 
     if resultado is None:
@@ -189,8 +190,12 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 
     intencao, dados = resultado
 
+    # Carrega nome do usuário
+    user = db.get_user(chat_id)
+    nome = user["nome"] if user else ""
+
     if intencao == "saudacao":
-        saudacao = _saudacao()
+        saudacao = _saudacao(nome)
         frases = [
             f"{saudacao} Precisando de algo?",
             f"{saudacao} No que posso ajudar?",
@@ -212,23 +217,24 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if intencao == "aula":
         agora = datetime.now(TZ)
         quando = dados["quando"]
+        grade = _load_grade(chat_id)
 
         if quando == "hoje":
-            info = _formatar_dia(agora.weekday(), agora)
+            info = _formatar_dia(agora.weekday(), agora, grade)
             intro = random.choice(["Hoje tem isso:", "Suas aulas de hoje:"])
         elif quando == "amanha":
             amanha = agora + timedelta(days=1)
-            info = _formatar_dia(amanha.weekday(), amanha)
+            info = _formatar_dia(amanha.weekday(), amanha, grade)
             intro = random.choice(["Amanhã:", "Pra amanhã:"])
         elif quando == "semana":
-            info = _aulas_semana()
+            info = _aulas_semana(grade)
             intro = "Sua semana:"
         elif quando == "dia":
             dia_num = dados["dia"]
-            info = _formatar_dia(dia_num)
+            info = _formatar_dia(dia_num, grade=grade)
             intro = f"{DIAS_NOME[dia_num]}:"
         else:
-            info = _formatar_dia(agora.weekday(), agora)
+            info = _formatar_dia(agora.weekday(), agora, grade)
             intro = "Hoje:"
 
         await update.message.reply_text(

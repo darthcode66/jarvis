@@ -1,4 +1,4 @@
-# Jarvis - Assistente Pessoal no Telegram
+# Famus - Assistente Pessoal no Telegram
 
 Bot Telegram que funciona como assistente pessoal inteligente, combinando IA conversacional (Groq/Gemini), horarios de onibus em tempo real, grade academica e consulta de atividades do portal FAM.
 
@@ -8,8 +8,8 @@ Desenvolvido por **Pedro** com auxilio do **Claude Code** (Anthropic).
 
 ## Funcionalidades
 
-### Assistente IA (Jarvis)
-- Personalidade estilo Jarvis do Iron Man: formal, prestativo, com humor acido sutil
+### Assistente IA (Famus)
+- Personalidade paulista: humor acido, sarcasmo sutil, girias naturais (mano, firmeza, suave, da hora)
 - Memoria de conversa (historico por chat, ate 20 mensagens)
 - Contexto dinamico: sabe a hora, dia, local estimado do usuario e proximos onibus
 - **Groq (Llama 3.3 70B)** como IA primaria — respostas em sub-segundo
@@ -43,7 +43,7 @@ jarvis/
 ├── src/
 │   ├── monitor.py          # Entry point — registra handlers e inicia polling
 │   ├── gemini.py           # Integracao IA (Groq + Gemini) + system prompt
-│   ├── jarvis.py           # NLP local por pattern matching (fallback)
+│   ├── famus.py            # NLP local por pattern matching (fallback)
 │   ├── onibus.py           # Dados de horarios + handlers Telegram
 │   ├── aulas.py            # Grade horaria + handlers Telegram
 │   ├── fam_scraper.py      # Scraper Selenium do portal FAM
@@ -91,7 +91,7 @@ Mensagem do usuario
         │ Falha
         ▼
   ┌─────────────┐
-  │  Jarvis NLP │──── Detectou ──→ Resposta local (sem API)
+  │  Famus NLP  │──── Detectou ──→ Resposta local (sem API)
   │  (patterns) │
   └─────────────┘
         │ Nao detectou
@@ -112,12 +112,12 @@ Mensagem do usuario
 ### `gemini.py` — Integracao IA
 - **Groq API** (primario): Llama 3.3 70B via API compativel com OpenAI
 - **Gemini API** (fallback): Flash Lite e Flash
-- System prompt com personalidade Jarvis, dados do usuario, grade e tabela completa de horarios
+- System prompt com personalidade Famus, dados do usuario, grade e tabela completa de horarios
 - Contexto dinamico gerado a cada mensagem: hora, local estimado, proximos onibus, aulas do dia
 - Historico de conversa por chat_id (unificado entre providers)
 - Conversao de markdown `[text](url)` para HTML `<a>` tags para o Telegram
 
-### `jarvis.py` — NLP Local
+### `famus.py` — NLP Local
 - Pattern matching por palavras-chave (sem API)
 - Detecta intencoes: saudacao, agradecimento, onibus (com rota), aulas, atividades, ajuda
 - Normalizacao de texto (remove acentos, lowercase)
@@ -128,7 +128,7 @@ Mensagem do usuario
 - Dict `HORARIOS` com 5 rotas e 233 horarios completos
 - Funcoes: `proximos_onibus()`, `todos_horarios()`, `resumo_trajetos()`
 - Handlers Telegram: comandos, callbacks inline, menu de botoes
-- Handler generico `mensagem_generica()`: tenta IA primeiro, jarvis.py como fallback
+- Handler generico `mensagem_generica()`: tenta IA primeiro, famus.py como fallback
 
 ### `aulas.py` — Grade Horaria
 - Grade do 5o semestre CC noturno (Turma 57-05-B)
@@ -251,17 +251,17 @@ ssh -i ~/.ssh/jarvis-aws.pem ubuntu@<IP_PUBLICO>
 ### Gerenciar o servico
 
 ```bash
-sudo systemctl status jarvis    # Ver status
-sudo systemctl restart jarvis   # Reiniciar
-sudo systemctl stop jarvis      # Parar
-sudo journalctl -u jarvis -f    # Ver logs em tempo real
+sudo systemctl status famus    # Ver status
+sudo systemctl restart famus   # Reiniciar
+sudo systemctl stop famus      # Parar
+sudo journalctl -u famus -f    # Ver logs em tempo real
 ```
 
 ### Atualizar o bot no servidor
 
 ```bash
 scp -i ~/.ssh/jarvis-aws.pem src/*.py ubuntu@<IP_PUBLICO>:~/jarvis/src/
-ssh -i ~/.ssh/jarvis-aws.pem ubuntu@<IP_PUBLICO> "sudo systemctl restart jarvis"
+ssh -i ~/.ssh/jarvis-aws.pem ubuntu@<IP_PUBLICO> "sudo systemctl restart famus"
 ```
 
 ---
@@ -308,11 +308,12 @@ O bot tambem entende mensagens em linguagem natural:
 
 1. **v1.0** — Bot basico com scraping do portal FAM e notificacoes de atividades
 2. **v2.0** — Adicionados horarios de onibus (rota trabalho→faculdade, 23 horarios)
-3. **v3.0** — Grade academica, NLP local (jarvis.py), botoes inline
-4. **v4.0** — Integracao Gemini AI com personalidade Jarvis
+3. **v3.0** — Grade academica, NLP local (famus.py), botoes inline
+4. **v4.0** — Integracao Gemini AI com personalidade Famus
 5. **v5.0** — Migracao para Groq (Llama 3.3 70B) + Gemini como fallback
 6. **v6.0** — Dados completos de todas as 5 rotas (233 horarios), formatacao aprimorada, reorganizacao do projeto
 7. **v7.0** — Deploy em producao na AWS EC2, caminhos relativos, servico systemd 24/7
+8. **v8.0** — Rebrand Jarvis → Famus, personalidade paulista para universitarios da FAM
 
 ---
 
