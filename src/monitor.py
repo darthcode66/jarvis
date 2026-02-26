@@ -21,7 +21,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/home/pedro/faculdade/jarvis/logs/monitor.log'),
+        logging.FileHandler(os.path.join(os.path.dirname(__file__), '..', 'logs', 'monitor.log')),
         logging.StreamHandler(),
     ],
 )

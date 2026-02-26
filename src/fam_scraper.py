@@ -11,6 +11,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from bs4 import BeautifulSoup
 import logging
+import os
 import time
 import unicodedata
 
@@ -134,7 +135,7 @@ class FAMScraper:
             time.sleep(2)
 
             # Salva screenshot para debug
-            self.driver.save_screenshot("/home/pedro/faculdade/jarvis/logs/debug_screenshot.png")
+            self.driver.save_screenshot(os.path.join(os.path.dirname(__file__), '..', 'logs', 'debug_screenshot.png'))
             logger.info("Screenshot salvo em logs/debug_screenshot.png")
 
             # Busca todas as linhas de atividades (tr com class lovelyrow1 ou lovelyrow2)

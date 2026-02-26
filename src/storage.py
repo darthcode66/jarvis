@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class Storage:
-    def __init__(self, data_file="/home/pedro/faculdade/jarvis/data/atividades.json"):
+    def __init__(self, data_file=os.path.join(os.path.dirname(__file__), '..', 'data', 'atividades.json')):
         self.data_file = data_file
         self._ensure_data_file()
 
