@@ -357,13 +357,6 @@ class FAMScraper:
             time.sleep(3)
 
             html = self.driver.page_source
-
-            # Debug: salvar HTML pra análise
-            debug_path = os.path.join(os.path.dirname(__file__), '..', 'logs', 'grade_debug.html')
-            with open(debug_path, 'w', encoding='utf-8') as f:
-                f.write(html)
-            logger.info("HTML da grade salvo em %s", debug_path)
-
             grade = parse_grade_html(html)
             logger.info("Grade extraída: %s", {k: len(v) for k, v in grade.items()})
             return grade
@@ -479,7 +472,7 @@ def _extrair_celula(celula) -> tuple[str, str]:
     if not partes:
         return "", ""
 
-    materia = partes[0]
+    materia = _limpar_nome_materia(partes[0])
 
     # Professor: segunda parte, remover ID numérico entre parênteses
     prof = ""
@@ -489,6 +482,15 @@ def _extrair_celula(celula) -> tuple[str, str]:
         prof = re.sub(r"\s*\(\d+\)\s*$", "", prof_raw).strip()
 
     return materia, prof
+
+
+def _limpar_nome_materia(nome: str) -> str:
+    """Remove sufixo de curso do nome da matéria.
+
+    Ex: 'Atividades de Extensão IV - Ciência da Computação' → 'Atividades de Extensão IV'
+    """
+    # Remove ' - NomeDoCurso' do final
+    return re.sub(r"\s*-\s*(?:Ciência da Computação|Engenharia|Administração|Direito|Pedagogia).*$", "", nome).strip()
 
 
 def _agrupar_grade(grade_crua: dict) -> dict:
