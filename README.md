@@ -183,7 +183,8 @@ Mensagem do usuario
 ### Instalacao
 
 ```bash
-cd /home/pedro/faculdade/jarvis
+git clone git@github.com:darthcode66/jarvis.git
+cd jarvis
 
 # Criar e ativar virtualenv
 python3 -m venv venv
@@ -205,17 +206,62 @@ cp .env.example .env
 4. **Gemini API Key**: Cadastre em [aistudio.google.com](https://aistudio.google.com/apikey) (gratuito)
 5. **FAM Login/Senha**: Credenciais do portal academico da FAM
 
-### Executando
+### Executando localmente
 
 ```bash
-cd /home/pedro/faculdade/jarvis/src
+cd src
 python monitor.py
 ```
 
-### Executando em background
+### Executando em background (local)
 
 ```bash
-nohup python /home/pedro/faculdade/jarvis/src/monitor.py > /dev/null 2>&1 &
+nohup python src/monitor.py > /dev/null 2>&1 &
+```
+
+---
+
+## Deploy em Producao (AWS EC2)
+
+O bot roda 24/7 em uma instancia **AWS EC2 t2.micro** (free tier, 12 meses).
+
+### Infraestrutura
+
+| Recurso | Especificacao |
+|---------|---------------|
+| Instancia | EC2 t2.micro (1 vCPU, 1GB RAM) |
+| SO | Ubuntu 24.04 LTS |
+| Regiao | us-east-1 (N. Virginia) |
+| Acesso | SSH via key pair |
+| Servico | systemd (reinicio automatico) |
+| Custo | $0 (free tier) |
+
+### Protecoes contra custos
+
+- **Budget Alert $0.01**: Email se qualquer centavo for cobrado
+- **Budget Alert $0.80 + previsao**: Email se gasto chegar perto de $1
+- **Politica IAM**: Bloqueia criacao de RDS, Load Balancer, NAT Gateway e Elastic IP
+
+### Conectar via SSH
+
+```bash
+ssh -i ~/.ssh/jarvis-aws.pem ubuntu@<IP_PUBLICO>
+```
+
+### Gerenciar o servico
+
+```bash
+sudo systemctl status jarvis    # Ver status
+sudo systemctl restart jarvis   # Reiniciar
+sudo systemctl stop jarvis      # Parar
+sudo journalctl -u jarvis -f    # Ver logs em tempo real
+```
+
+### Atualizar o bot no servidor
+
+```bash
+scp -i ~/.ssh/jarvis-aws.pem src/*.py ubuntu@<IP_PUBLICO>:~/jarvis/src/
+ssh -i ~/.ssh/jarvis-aws.pem ubuntu@<IP_PUBLICO> "sudo systemctl restart jarvis"
 ```
 
 ---
@@ -253,6 +299,8 @@ O bot tambem entende mensagens em linguagem natural:
 | Dados de Onibus | API Mobilibus (SOU Transportes Americana) |
 | Timezone | America/Sao_Paulo (ZoneInfo) |
 | Persistencia | JSON local |
+| Infraestrutura | AWS EC2 t2.micro (free tier) |
+| CI/CD | Deploy manual via SCP + systemd |
 
 ---
 
@@ -264,6 +312,7 @@ O bot tambem entende mensagens em linguagem natural:
 4. **v4.0** — Integracao Gemini AI com personalidade Jarvis
 5. **v5.0** — Migracao para Groq (Llama 3.3 70B) + Gemini como fallback
 6. **v6.0** — Dados completos de todas as 5 rotas (233 horarios), formatacao aprimorada, reorganizacao do projeto
+7. **v7.0** — Deploy em producao na AWS EC2, caminhos relativos, servico systemd 24/7
 
 ---
 

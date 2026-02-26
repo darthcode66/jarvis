@@ -119,3 +119,27 @@ A IA gera markdown, que passa por `_formatar_para_telegram()`:
 - Converte para `<a href="url">texto</a>`
 - Escapa HTML no resto do texto via `html.escape()`
 - Resultado enviado com `parse_mode="HTML"`
+
+## Infraestrutura de Producao
+
+### AWS EC2
+- **Instancia**: t2.micro (1 vCPU, 1GB RAM) — free tier 12 meses
+- **SO**: Ubuntu 24.04 LTS
+- **Regiao**: us-east-1 (N. Virginia)
+- **Security Group**: Apenas porta 22 (SSH) aberta
+
+### Servico systemd
+- **Unit file**: `/etc/systemd/system/jarvis.service`
+- **Restart**: `always` com `RestartSec=10` — se o bot crashar, reinicia em 10s
+- **WorkingDirectory**: `/home/ubuntu/jarvis/src`
+- **EnvironmentFile**: `/home/ubuntu/jarvis/.env`
+
+### Protecoes de Custo
+- Budget Alert $0.01 (email imediato)
+- Budget Alert $0.80 + previsao de $1 (email preventivo)
+- Politica IAM `DenyExpensiveResources`: bloqueia criacao de RDS, Load Balancer, NAT Gateway, Elastic IP e instancias maiores que t2.micro
+
+### Portabilidade
+- Todos os caminhos de arquivos sao relativos (`os.path.dirname(__file__)`)
+- Funciona em qualquer maquina sem ajuste de paths
+- Deploy: copiar arquivos via SCP + reiniciar servico
