@@ -347,6 +347,37 @@ class FAMScraper:
         detalhes["materiais"] = materiais_unicos
         return detalhes
 
+    def extrair_notas(self):
+        """Navega até a página de notas e extrai boletim + info do aluno.
+
+        Retorna (notas_list, info_aluno_dict) ou (None, None) em caso de erro.
+        """
+        try:
+            logger.info("Navegando para página de notas...")
+            self.driver.get(
+                "https://www.famportal.com.br/fam/pg_portal.php?"
+                "frame=frame_alu_notas.php&slc=X&frame_notas=frame_alu_notas_resultados.php"
+            )
+            time.sleep(3)
+
+            html = self.driver.page_source
+
+            # Salva HTML para debug/análise
+            debug_path = os.path.join(os.path.dirname(__file__), '..', 'logs', 'notas_debug.html')
+            os.makedirs(os.path.dirname(debug_path), exist_ok=True)
+            with open(debug_path, 'w', encoding='utf-8') as f:
+                f.write(html)
+            logger.info("HTML de notas salvo em %s", debug_path)
+
+            notas = parse_notas_html(html)
+            info = parse_info_aluno(html)
+            logger.info("Notas extraídas: %s | Info: %s", len(notas) if notas else 0, info)
+            return notas, info
+
+        except Exception as e:
+            logger.error("Erro ao extrair notas: %s", e, exc_info=True)
+            return None, None
+
     def extrair_grade(self):
         """Navega até a página de grade e extrai a grade horária."""
         try:
@@ -527,6 +558,131 @@ def _agrupar_grade(grade_crua: dict) -> dict:
         resultado[dia] = blocos
 
     return resultado
+
+
+# ── Parser de info do aluno ──────────────────────────────────────────────────
+
+
+def parse_info_aluno(html: str) -> dict | None:
+    """Extrai informações do aluno da página de notas/resultados.
+
+    Retorno: {"curso": str, "semestre": str, "turma": str, "sala": str}
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    info = {}
+
+    # Turma e Localização: <font class="login-u">57-05-B</font> e <font class="login-u">Bloco 2 - Sala 073...</font>
+    login_u_tags = soup.find_all("font", class_="login-u")
+    for tag in login_u_tags:
+        texto = tag.get_text(strip=True)
+        # Turma no formato XX-YY-Z (código_curso-série-letra)
+        if re.match(r"^\d+-\d+-\w$", texto):
+            partes = texto.split("-")
+            info["turma_codigo"] = texto
+            if len(partes) >= 2:
+                info["semestre"] = str(int(partes[1]))  # "05" → "5"
+        # Localização (Bloco / Sala)
+        if "Bloco" in texto or "Sala" in texto:
+            info["sala"] = texto
+
+    # Curso: tabela com Curso | (vazio) | Série | Turma seguida de dados
+    for td in soup.find_all("td", class_="LinhaPar"):
+        texto = td.get_text(strip=True)
+        if "Computação" in texto or "Engenharia" in texto or "Administração" in texto or "Direito" in texto:
+            info["curso"] = texto
+            break
+
+    return info if info else None
+
+
+# ── Parser de notas ──────────────────────────────────────────────────────────
+
+
+def _parse_nota_valor(texto: str) -> float | None:
+    """Converte texto de nota para float. Retorna None se vazio ou inválido."""
+    texto = texto.strip().replace(",", ".")
+    if not texto or texto in ("-", "--", ""):
+        return None
+    try:
+        return float(texto)
+    except ValueError:
+        return None
+
+
+def parse_notas_html(html: str) -> list[dict] | None:
+    """Parseia HTML da página de notas (aba Resultados) do portal FAM.
+
+    Estrutura da tabela (class="GradeNotas"):
+      Colunas: Código | Disciplina | N1 | Peso | MP1 | N2 | Peso | MP2 |
+               N3 | Peso | MP3 | MS | AR_elig | AR | MF | MaxFaltas | Faltas
+      (17 <td> por linha, ou 12 quando N2/N3 "Não disponível" com colspan=6)
+
+    Retorno: [{"disciplina": str, "n1": float|None, "n2": float|None,
+               "n3": float|None, "media_semestral": float|None,
+               "media_final": float|None, "faltas": int, "max_faltas": int}, ...]
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    tabela = soup.find("table", class_="GradeNotas")
+    if not tabela:
+        logger.warning("Tabela GradeNotas não encontrada no HTML")
+        return None
+
+    notas = []
+    for row in tabela.find_all("tr"):
+        tds = row.find_all("td")
+        if len(tds) < 10:
+            continue
+
+        # Linhas de dados começam com código numérico na primeira célula
+        codigo = tds[0].get_text(strip=True)
+        if not codigo.isdigit():
+            continue
+
+        disciplina = _limpar_nome_materia(tds[1].get_text(strip=True))
+
+        # Verifica se N2/N3 estão disponíveis (colspan "Não disponível")
+        nao_disponivel = any("Não disponível" in td.get_text() for td in tds)
+
+        # N1 sempre na posição 2
+        n1 = _parse_nota_valor(tds[2].get_text(strip=True))
+
+        # N2 e N3 dependem de disponibilidade
+        n2 = None
+        n3 = None
+        if not nao_disponivel and len(tds) >= 17:
+            n2 = _parse_nota_valor(tds[5].get_text(strip=True))
+            n3 = _parse_nota_valor(tds[8].get_text(strip=True))
+
+        # MS (Média Semestral) — classe única ColunaMP
+        ms_td = row.find("td", class_="ColunaMP")
+        ms = _parse_nota_valor(ms_td.get_text(strip=True)) if ms_td else None
+
+        # MF (Média Final) — classe única ColunaMF
+        mf_td = row.find("td", class_="ColunaMF")
+        mf = _parse_nota_valor(mf_td.get_text(strip=True)) if mf_td else None
+
+        # Faltas e máximo (duas últimas células)
+        faltas_text = tds[-1].get_text(strip=True)
+        max_faltas_text = tds[-2].get_text(strip=True)
+        faltas = int(faltas_text) if faltas_text.isdigit() else 0
+        max_faltas = int(max_faltas_text) if max_faltas_text.isdigit() else 0
+
+        notas.append({
+            "disciplina": disciplina,
+            "n1": n1,
+            "n2": n2,
+            "n3": n3,
+            "media_semestral": ms,
+            "media_final": mf,
+            "faltas": faltas,
+            "max_faltas": max_faltas,
+        })
+
+    if not notas:
+        logger.warning("Nenhuma nota encontrada — verifique logs/notas_debug.html")
+        return None
+
+    return notas
 
 
 if __name__ == "__main__":

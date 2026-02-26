@@ -65,6 +65,17 @@ def init_db() -> None:
         """)
         con.commit()
 
+        # Migrações: adiciona colunas se não existem
+        cols = [row[1] for row in con.execute("PRAGMA table_info(usuarios)").fetchall()]
+        if "notas" not in cols:
+            con.execute("ALTER TABLE usuarios ADD COLUMN notas TEXT")
+            con.commit()
+            logger.info("Coluna 'notas' adicionada à tabela usuarios.")
+        if "info_aluno" not in cols:
+            con.execute("ALTER TABLE usuarios ADD COLUMN info_aluno TEXT")
+            con.commit()
+            logger.info("Coluna 'info_aluno' adicionada à tabela usuarios.")
+
         # Seed: migra Pedro se TELEGRAM_CHAT_ID existe e banco está vazio
         chat_id_str = os.getenv("TELEGRAM_CHAT_ID", "")
         if chat_id_str:
@@ -165,6 +176,38 @@ def get_grade(chat_id: int) -> dict | None:
         return None
     try:
         return json.loads(user["grade"])
+    except json.JSONDecodeError:
+        return None
+
+
+def set_notas(chat_id: int, notas_list: list[dict]) -> None:
+    """Serializa e salva notas no banco."""
+    update_user(chat_id, notas=json.dumps(notas_list, ensure_ascii=False))
+
+
+def get_notas(chat_id: int) -> list[dict] | None:
+    """Retorna notas deserializadas ou None."""
+    user = get_user(chat_id)
+    if not user or not user["notas"]:
+        return None
+    try:
+        return json.loads(user["notas"])
+    except json.JSONDecodeError:
+        return None
+
+
+def set_info_aluno(chat_id: int, info: dict) -> None:
+    """Serializa e salva info do aluno no banco."""
+    update_user(chat_id, info_aluno=json.dumps(info, ensure_ascii=False))
+
+
+def get_info_aluno(chat_id: int) -> dict | None:
+    """Retorna info do aluno deserializada ou None."""
+    user = get_user(chat_id)
+    if not user or not user.get("info_aluno"):
+        return None
+    try:
+        return json.loads(user["info_aluno"])
     except json.JSONDecodeError:
         return None
 

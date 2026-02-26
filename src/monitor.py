@@ -137,6 +137,175 @@ async def cmd_atividades(update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(texto, parse_mode="Markdown")
 
 
+# ── /notas — consulta boletim ─────────────────────────────────────────────
+
+
+def _scrape_notas(chat_id: int):
+    """Blocking: faz login + extrai notas e info do aluno.
+
+    Retorna (notas_list, info_dict) ou (None, None).
+    """
+    creds = db.get_credentials(chat_id)
+    if not creds:
+        return None, None
+
+    fam_login, fam_senha = creds
+    scraper = FAMScraper(fam_login, fam_senha, headless=True)
+    try:
+        if not scraper.fazer_login():
+            logger.error("Falha no login ao extrair notas (cmd /notas)")
+            return None, None
+        return scraper.extrair_notas()
+    except Exception as e:
+        logger.error("Erro ao extrair notas: %s", e, exc_info=True)
+        return None, None
+    finally:
+        scraper.close()
+
+
+def _fmt_nota(valor) -> str:
+    """Formata valor de nota para exibição."""
+    if valor is None:
+        return "—"
+    return f"{valor:.1f}"
+
+
+def _emoji_media(ms) -> str:
+    """Emoji baseado na média semestral."""
+    if ms is None:
+        return "📘"
+    if ms >= 6.0:
+        return "✅"
+    if ms > 0:
+        return "⚠️"
+    return "📘"
+
+
+async def cmd_notas(update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /notas — consulta boletim/notas do portal FAM."""
+    chat_id = update.effective_chat.id
+
+    if not db.is_registered(chat_id):
+        await update.message.reply_text("Primeiro faça seu cadastro com /start 👆")
+        return
+
+    msg = await update.message.reply_text("🔄 Consultando notas no portal FAM...")
+
+    loop = asyncio.get_event_loop()
+    notas, info = await loop.run_in_executor(None, _scrape_notas, chat_id)
+
+    if notas is None:
+        await msg.edit_text(
+            "❌ Não foi possível extrair as notas.\n"
+            "Verifique suas credenciais (/config)."
+        )
+        return
+
+    if not notas:
+        await msg.edit_text("📭 Nenhuma nota encontrada no portal.")
+        return
+
+    # Salva no banco (cache)
+    db.set_notas(chat_id, notas)
+    if info:
+        db.set_info_aluno(chat_id, info)
+
+    # Formata resposta
+    linhas = [f"📊 *Boletim — {len(notas)} disciplinas*\n"]
+
+    for n in notas:
+        ms = n.get("media_semestral")
+        mf = n.get("media_final")
+        emoji = _emoji_media(mf if mf is not None else ms)
+        disc = n.get("disciplina", "N/A")
+
+        linhas.append(f"{emoji} *{disc}*")
+        linhas.append(
+            f"   N1: {_fmt_nota(n.get('n1'))}  |  "
+            f"N2: {_fmt_nota(n.get('n2'))}  |  "
+            f"N3: {_fmt_nota(n.get('n3'))}"
+        )
+        linhas.append(
+            f"   MS: {_fmt_nota(ms)}  |  MF: {_fmt_nota(mf)}"
+        )
+        faltas = n.get("faltas", 0)
+        max_f = n.get("max_faltas", 0)
+        if max_f:
+            linhas.append(f"   Faltas: {faltas}/{max_f}")
+        linhas.append("")
+
+    texto = "\n".join(linhas)
+
+    # Telegram limita mensagens a 4096 chars
+    if len(texto) > 4096:
+        texto = texto[:4090] + "\n..."
+
+    await msg.edit_text(texto, parse_mode="Markdown")
+
+
+# ── /faltas — consulta rápida de faltas ──────────────────────────────────
+
+
+async def cmd_faltas(update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /faltas — mostra faltas por disciplina (usa cache ou faz scrape)."""
+    chat_id = update.effective_chat.id
+
+    if not db.is_registered(chat_id):
+        await update.message.reply_text("Primeiro faça seu cadastro com /start 👆")
+        return
+
+    # Tenta usar cache do banco
+    notas = db.get_notas(chat_id)
+
+    if not notas:
+        msg = await update.message.reply_text("🔄 Consultando faltas no portal FAM...")
+        loop = asyncio.get_event_loop()
+        notas, info = await loop.run_in_executor(None, _scrape_notas, chat_id)
+
+        if notas is None:
+            await msg.edit_text(
+                "❌ Não foi possível extrair as faltas.\n"
+                "Verifique suas credenciais (/config)."
+            )
+            return
+
+        if not notas:
+            await msg.edit_text("📭 Nenhuma falta encontrada no portal.")
+            return
+
+        db.set_notas(chat_id, notas)
+        if info:
+            db.set_info_aluno(chat_id, info)
+    else:
+        msg = None
+
+    # Filtra só disciplinas com max_faltas definido
+    com_faltas = [n for n in notas if n.get("max_faltas", 0) > 0]
+
+    if not com_faltas:
+        texto = "📭 Nenhuma disciplina com controle de faltas."
+    else:
+        linhas = ["📋 *Faltas por disciplina*\n"]
+        for n in com_faltas:
+            faltas = n.get("faltas", 0)
+            max_f = n.get("max_faltas", 0)
+            pct = (faltas / max_f * 100) if max_f else 0
+            if pct >= 75:
+                emoji = "🔴"
+            elif pct >= 50:
+                emoji = "🟡"
+            else:
+                emoji = "🟢"
+            linhas.append(f"{emoji} *{n['disciplina']}*")
+            linhas.append(f"   {faltas}/{max_f} faltas ({pct:.0f}%)")
+        texto = "\n".join(linhas)
+
+    if msg:
+        await msg.edit_text(texto, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(texto, parse_mode="Markdown")
+
+
 # ── /grade — re-sync da grade ────────────────────────────────────────────
 
 
@@ -204,9 +373,11 @@ def main():
     registrar_onibus(app)
     registrar_aulas(app)
 
-    # Handler de atividades FAM e grade
+    # Handlers de atividades FAM, grade e notas
     app.add_handler(CommandHandler("atividades", cmd_atividades))
     app.add_handler(CommandHandler("grade", cmd_grade))
+    app.add_handler(CommandHandler("notas", cmd_notas))
+    app.add_handler(CommandHandler("faltas", cmd_faltas))
 
     # Handlers de config/resetar
     app.add_handler(CommandHandler("config", cmd_config))

@@ -157,17 +157,19 @@ async def receber_fam_senha(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return CONFIRMA
 
 
-def _scrape_grade(fam_login: str, fam_senha: str):
-    """Blocking: faz login + extrai grade do portal. Roda via run_in_executor."""
+def _scrape_onboarding(fam_login: str, fam_senha: str):
+    """Blocking: faz login + extrai grade, notas e info do aluno numa única sessão."""
     scraper = FAMScraper(fam_login, fam_senha, headless=True)
     try:
         if not scraper.fazer_login():
-            logger.error("Falha no login ao extrair grade (cadastro)")
-            return None
-        return scraper.extrair_grade()
+            logger.error("Falha no login ao extrair dados (cadastro)")
+            return None, None, None
+        grade = scraper.extrair_grade()
+        notas, info = scraper.extrair_notas()
+        return grade, notas, info
     except Exception as e:
-        logger.error("Erro ao extrair grade no cadastro: %s", e, exc_info=True)
-        return None
+        logger.error("Erro ao extrair dados no cadastro: %s", e, exc_info=True)
+        return None, None, None
     finally:
         scraper.close()
 
@@ -210,31 +212,52 @@ async def confirmar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     await update.message.reply_text(
         f"✅ Cadastro completo, *{nome}*!\n\n"
-        "🔄 Importando sua grade de aulas do portal FAM...",
+        "🔄 Importando seus dados do portal FAM (grade, notas, faltas)...",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove(),
     )
 
-    # Scrape da grade em background
+    # Scrape de grade + notas + info numa única sessão
     loop = asyncio.get_event_loop()
-    grade = await loop.run_in_executor(None, _scrape_grade, fam_login, fam_senha)
+    grade, notas, info = await loop.run_in_executor(
+        None, _scrape_onboarding, fam_login, fam_senha
+    )
+
+    resultados = []
 
     if grade and any(grade.get(str(d)) for d in range(6)):
         db.set_grade(chat_id, grade)
-        await update.message.reply_text(
-            "✅ Grade importada com sucesso!\n\n"
-            "Use /aula pra ver seus horários.\n"
-            "Se a grade mudar, use /grade pra atualizar.",
-        )
+        resultados.append("✅ Grade importada")
     else:
-        await update.message.reply_text(
-            "⚠️ Não consegui importar a grade agora.\n"
-            "Use /grade mais tarde pra tentar de novo, ou peça ao admin.\n\n"
-            "Enquanto isso, todos os outros comandos já funcionam:\n"
-            "/aula — grade de aulas\n"
-            "/onibus — horários de ônibus\n"
-            "/atividades — portal FAM",
-        )
+        resultados.append("⚠️ Grade não encontrada")
+
+    if notas:
+        db.set_notas(chat_id, notas)
+        resultados.append(f"✅ Notas importadas ({len(notas)} disciplinas)")
+    else:
+        resultados.append("⚠️ Notas não encontradas")
+
+    if info:
+        db.set_info_aluno(chat_id, info)
+        extras = []
+        if info.get("curso"):
+            extras.append(info["curso"])
+        if info.get("semestre"):
+            extras.append(f"{info['semestre']}º semestre")
+        if info.get("sala"):
+            extras.append(info["sala"])
+        if extras:
+            resultados.append(f"✅ Info: {', '.join(extras)}")
+
+    await update.message.reply_text(
+        "\n".join(resultados) + "\n\n"
+        "Comandos disponíveis:\n"
+        "/aula — grade de aulas\n"
+        "/onibus — horários de ônibus\n"
+        "/atividades — portal FAM\n"
+        "/notas — boletim\n"
+        "/faltas — faltas por disciplina",
+    )
 
     context.user_data.clear()
     return ConversationHandler.END
