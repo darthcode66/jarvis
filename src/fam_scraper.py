@@ -12,6 +12,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from bs4 import BeautifulSoup
 import logging
 import os
+import re
 import time
 import unicodedata
 
@@ -346,11 +347,176 @@ class FAMScraper:
         detalhes["materiais"] = materiais_unicos
         return detalhes
 
+    def extrair_grade(self):
+        """Navega até a página de grade e extrai a grade horária."""
+        try:
+            logger.info("Navegando para página de grade horária...")
+            self.driver.get(
+                "https://www.famportal.com.br/fam/pg_portal.php?frame=frame_alu_gradealuno.php"
+            )
+            time.sleep(3)
+
+            html = self.driver.page_source
+            grade = parse_grade_html(html)
+            logger.info("Grade extraída: %s", {k: len(v) for k, v in grade.items()})
+            return grade
+
+        except Exception as e:
+            logger.error("Erro ao extrair grade: %s", e, exc_info=True)
+            return None
+
     def close(self):
         """Fecha o navegador"""
         if self.driver:
             self.driver.quit()
             logger.info("Driver fechado")
+
+
+# ── Mapeamento aulas → horários (noturno FAM) ──────────────────────────────
+
+HORARIOS = {
+    "P1": ("", ""),          # horário variável (sábado / ativ. complementar)
+    "01": ("19:00", "19:50"),
+    "02": ("19:50", "20:40"),
+    "03": ("20:50", "21:40"),
+    "04": ("21:40", "22:30"),
+}
+
+# Colunas da tabela: SEG=0, TER=1, QUA=2, QUI=3, SEX=4, SAB=5
+COLUNAS_DIA = {1: "0", 2: "1", 3: "2", 4: "3", 5: "4", 6: "5"}
+
+
+def parse_grade_html(html: str) -> dict:
+    """Parseia HTML da página de grade e retorna dict no formato do banco.
+
+    Retorno: {"0": [{"materia": ..., "prof": ..., "inicio": ..., "fim": ...}], ...}
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    tabela = soup.find("table", class_="Grade")
+    if not tabela:
+        logger.warning("Tabela de grade não encontrada no HTML")
+        return {str(d): [] for d in range(6)}
+
+    linhas = tabela.find_all("tr")
+    if len(linhas) < 2:
+        logger.warning("Tabela de grade sem linhas de dados")
+        return {str(d): [] for d in range(6)}
+
+    # grade_crua: {dia_str: [(aula_label, materia, prof), ...]}
+    grade_crua = {str(d): [] for d in range(6)}
+
+    # Pula header (primeira linha)
+    for linha in linhas[1:]:
+        celulas = linha.find_all("td", recursive=False)
+        if not celulas:
+            continue
+
+        # Primeira célula = label da aula (P1, 01, 02, 03, 04)
+        aula_label = celulas[0].get_text(strip=True)
+        if aula_label not in HORARIOS:
+            continue
+
+        # Células restantes: SEG(1), TER(2), QUA(3), QUI(4), SEX(5), SAB(6)
+        for col_idx in range(1, min(len(celulas), 7)):
+            dia_str = COLUNAS_DIA.get(col_idx)
+            if dia_str is None:
+                continue
+
+            celula = celulas[col_idx]
+            classe = celula.get("class", [])
+
+            # Só processa células com conteúdo (LinhaPar / LinhaImpar)
+            if not any(c in classe for c in ("LinhaPar", "LinhaImpar")):
+                continue
+
+            # Extrai matéria e professor do HTML da célula
+            materia, prof = _extrair_celula(celula)
+            if materia:
+                grade_crua[dia_str].append((aula_label, materia, prof))
+
+    # Agrupa slots consecutivos com mesma matéria por dia
+    return _agrupar_grade(grade_crua)
+
+
+def _extrair_celula(celula) -> tuple[str, str]:
+    """Extrai (matéria, professor) de uma célula da grade.
+
+    Estrutura esperada:
+        NomeMatéria<br><br>
+        <font class="MensagensAtv">NomeProfessor(ID)<br><br></font>
+        TurmaCódigo[ID]<br><br>
+        <font class="MensagensAtv">Curso</font>
+    """
+    texto = celula.get_text(separator="\n", strip=True)
+    if not texto:
+        return "", ""
+
+    # Divide o texto por linhas e remove vazias
+    partes = [p.strip() for p in texto.splitlines() if p.strip()]
+    if not partes:
+        return "", ""
+
+    materia = partes[0]
+
+    # Professor: segunda parte, remover ID numérico entre parênteses
+    prof = ""
+    if len(partes) > 1:
+        prof_raw = partes[1]
+        # Remove "(123)" do final
+        prof = re.sub(r"\s*\(\d+\)\s*$", "", prof_raw).strip()
+
+    return materia, prof
+
+
+def _agrupar_grade(grade_crua: dict) -> dict:
+    """Agrupa slots consecutivos com mesma matéria em blocos com início/fim.
+
+    Entrada: {"0": [("01", "POO", "Prof"), ("02", "POO", "Prof"), ("03", "Redes", "Prof2")]}
+    Saída:   {"0": [{"materia": "POO", "prof": "Prof", "inicio": "19:00", "fim": "20:40"},
+                     {"materia": "Redes", "prof": "Prof2", "inicio": "20:50", "fim": "21:40"}]}
+    """
+    # Ordem das aulas para determinar consecutividade
+    ordem_aulas = ["P1", "01", "02", "03", "04"]
+
+    resultado = {}
+    for dia, slots in grade_crua.items():
+        blocos = []
+        if not slots:
+            resultado[dia] = []
+            continue
+
+        # Ordena por posição na ordem de aulas
+        slots.sort(key=lambda s: ordem_aulas.index(s[0]) if s[0] in ordem_aulas else 99)
+
+        bloco_atual = None
+        bloco_aulas = []
+
+        for aula_label, materia, prof in slots:
+            if bloco_atual and bloco_atual[0] == materia:
+                # Mesma matéria → estende o bloco
+                bloco_aulas.append(aula_label)
+            else:
+                # Matéria diferente → fecha bloco anterior, abre novo
+                if bloco_atual:
+                    blocos.append(_fechar_bloco(bloco_atual, bloco_aulas))
+                bloco_atual = (materia, prof)
+                bloco_aulas = [aula_label]
+
+        # Fecha último bloco
+        if bloco_atual:
+            blocos.append(_fechar_bloco(bloco_atual, bloco_aulas))
+
+        resultado[dia] = blocos
+
+    return resultado
+
+
+def _fechar_bloco(bloco_info: tuple, aulas: list) -> dict:
+    """Cria dict de bloco a partir de (materia, prof) e lista de labels de aula."""
+    materia, prof = bloco_info
+    inicio = HORARIOS.get(aulas[0], ("", ""))[0]
+    fim = HORARIOS.get(aulas[-1], ("", ""))[1]
+    return {"materia": materia, "prof": prof, "inicio": inicio, "fim": fim}
 
 
 if __name__ == "__main__":

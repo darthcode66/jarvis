@@ -2,6 +2,7 @@
 Fluxo de onboarding — ConversationHandler para cadastro de novos usuários.
 """
 
+import asyncio
 import logging
 
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -14,6 +15,7 @@ from telegram.ext import (
 )
 
 import db
+from fam_scraper import FAMScraper
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,13 @@ async def iniciar_cadastro(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat_id = update.effective_chat.id
 
     if db.is_registered(chat_id):
+        # Já cadastrado → mostra menu normal
+        from onibus import menu_keyboard
+        user = db.get_user(chat_id)
+        nome = user["nome"] if user else ""
+        await update.message.reply_text(
+            f"🤖 Fala {nome}! Escolhe o trajeto:", reply_markup=menu_keyboard()
+        )
         return ConversationHandler.END
 
     await update.message.reply_text(
@@ -148,6 +157,21 @@ async def receber_fam_senha(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return CONFIRMA
 
 
+def _scrape_grade(fam_login: str, fam_senha: str):
+    """Blocking: faz login + extrai grade do portal. Roda via run_in_executor."""
+    scraper = FAMScraper(fam_login, fam_senha, headless=True)
+    try:
+        if not scraper.fazer_login():
+            logger.error("Falha no login ao extrair grade (cadastro)")
+            return None
+        return scraper.extrair_grade()
+    except Exception as e:
+        logger.error("Erro ao extrair grade no cadastro: %s", e, exc_info=True)
+        return None
+    finally:
+        scraper.close()
+
+
 async def confirmar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     resposta = update.message.text.strip().lower()
     chat_id = update.effective_chat.id
@@ -171,6 +195,10 @@ async def confirmar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     # Salva tudo no banco
     d = context.user_data
+    fam_login = d["fam_login"]
+    fam_senha = d["fam_senha"]
+    nome = d["nome"]
+
     db.update_user(
         chat_id,
         endereco_casa=d["endereco_casa"],
@@ -178,20 +206,35 @@ async def confirmar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         horario_saida_trabalho=d.get("horario_saida_trabalho"),
         onboarding_completo=1,
     )
-    db.set_credentials(chat_id, d["fam_login"], d["fam_senha"])
+    db.set_credentials(chat_id, fam_login, fam_senha)
 
     await update.message.reply_text(
-        f"✅ Cadastro completo, *{d['nome']}*!\n\n"
-        "Agora você pode usar todos os comandos:\n"
-        "/aula — grade de aulas\n"
-        "/onibus — horários de ônibus\n"
-        "/atividades — portal FAM\n"
-        "/help — todos os comandos\n\n"
-        "Sua grade de aulas será configurada automaticamente na próxima consulta ao portal, "
-        "ou fale com o admin pra incluir manualmente. 😉",
+        f"✅ Cadastro completo, *{nome}*!\n\n"
+        "🔄 Importando sua grade de aulas do portal FAM...",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove(),
     )
+
+    # Scrape da grade em background
+    loop = asyncio.get_event_loop()
+    grade = await loop.run_in_executor(None, _scrape_grade, fam_login, fam_senha)
+
+    if grade and any(grade.get(str(d)) for d in range(6)):
+        db.set_grade(chat_id, grade)
+        await update.message.reply_text(
+            "✅ Grade importada com sucesso!\n\n"
+            "Use /aula pra ver seus horários.\n"
+            "Se a grade mudar, use /grade pra atualizar.",
+        )
+    else:
+        await update.message.reply_text(
+            "⚠️ Não consegui importar a grade agora.\n"
+            "Use /grade mais tarde pra tentar de novo, ou peça ao admin.\n\n"
+            "Enquanto isso, todos os outros comandos já funcionam:\n"
+            "/aula — grade de aulas\n"
+            "/onibus — horários de ônibus\n"
+            "/atividades — portal FAM",
+        )
 
     context.user_data.clear()
     return ConversationHandler.END

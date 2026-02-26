@@ -137,6 +137,57 @@ async def cmd_atividades(update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(texto, parse_mode="Markdown")
 
 
+# ── /grade — re-sync da grade ────────────────────────────────────────────
+
+
+def _scrape_grade(chat_id: int):
+    """Blocking: faz login + extrai grade do portal. Roda via run_in_executor."""
+    creds = db.get_credentials(chat_id)
+    if not creds:
+        return None
+
+    fam_login, fam_senha = creds
+    scraper = FAMScraper(fam_login, fam_senha, headless=True)
+    try:
+        if not scraper.fazer_login():
+            logger.error("Falha no login ao extrair grade (cmd /grade)")
+            return None
+        return scraper.extrair_grade()
+    except Exception as e:
+        logger.error("Erro ao extrair grade: %s", e, exc_info=True)
+        return None
+    finally:
+        scraper.close()
+
+
+async def cmd_grade(update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /grade — força re-sync da grade a partir do portal."""
+    chat_id = update.effective_chat.id
+
+    if not db.is_registered(chat_id):
+        await update.message.reply_text("Primeiro faça seu cadastro com /start 👆")
+        return
+
+    msg = await update.message.reply_text("🔄 Atualizando grade a partir do portal FAM...")
+
+    loop = asyncio.get_event_loop()
+    grade = await loop.run_in_executor(None, _scrape_grade, chat_id)
+
+    if grade and any(grade.get(str(d)) for d in range(6)):
+        db.set_grade(chat_id, grade)
+        # Conta total de matérias
+        total = sum(len(v) for v in grade.values())
+        await msg.edit_text(
+            f"✅ Grade atualizada! ({total} blocos de aula importados)\n"
+            "Use /aula pra conferir."
+        )
+    else:
+        await msg.edit_text(
+            "❌ Não foi possível importar a grade.\n"
+            "Verifique se suas credenciais estão corretas (/config)."
+        )
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
@@ -153,8 +204,9 @@ def main():
     registrar_onibus(app)
     registrar_aulas(app)
 
-    # Handler de atividades FAM
+    # Handler de atividades FAM e grade
     app.add_handler(CommandHandler("atividades", cmd_atividades))
+    app.add_handler(CommandHandler("grade", cmd_grade))
 
     # Handlers de config/resetar
     app.add_handler(CommandHandler("config", cmd_config))
