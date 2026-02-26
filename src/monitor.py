@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 
 from dotenv import load_dotenv
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -357,6 +358,187 @@ async def cmd_grade(update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# ── Verificação periódica de notas e faltas ──────────────────────────────
+#
+# COMO FUNCIONA:
+#   1. job_verificar_atualizacoes() é agendado no main() via JobQueue (APScheduler)
+#      - Roda a cada 2 horas (interval=7200), primeiro check após 60s do boot
+#   2. Para cada usuário registrado:
+#      a. _check_notas_usuario() faz scrape do portal FAM (blocking, via executor)
+#      b. Compara notas novas com o cache salvo no banco (db.get_notas)
+#      c. Atualiza cache no banco SEMPRE (mesmo sem mudanças)
+#      d. Retorna (mudancas_notas, mudancas_faltas) ou None
+#   3. Se houver mudanças, envia notificações separadas (notas e faltas)
+#   4. Sleep de 5s entre usuários para não sobrecarregar portal/VPS
+#
+# COMPORTAMENTO DE SEGURANÇA:
+#   - Se o cache estiver vazio (primeiro scrape), popula sem notificar
+#   - Se o scrape falhar, loga o erro e continua pro próximo usuário
+#   - Nunca roda scrape em paralelo (sequencial por design)
+#
+# PARA DESATIVAR EM EMERGÊNCIA:
+#   Comentar as 3 linhas do run_repeating no main() e reiniciar o serviço:
+#     sudo systemctl restart famus
+#
+# PARA FORÇAR EXECUÇÃO MANUAL (debug):
+#   Alterar first=5 no run_repeating e reiniciar — roda em 5 segundos
+#
+
+
+_CAMPOS_NOTA = ["n1", "n2", "n3", "media_semestral", "media_final"]
+_LABEL_CAMPO = {
+    "n1": "N1",
+    "n2": "N2",
+    "n3": "N3",
+    "media_semestral": "Média Semestral",
+    "media_final": "Média Final",
+}
+
+
+def _comparar_notas(antigas: list[dict], novas: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Compara notas antigas vs novas.
+
+    Retorna (mudancas_notas, mudancas_faltas) separadamente.
+    """
+    velhas_por_disc = {n["disciplina"]: n for n in antigas}
+    mudancas_notas = []
+    mudancas_faltas = []
+
+    for nova in novas:
+        disc = nova["disciplina"]
+        velha = velhas_por_disc.get(disc, {})
+
+        # Notas
+        diffs_notas = []
+        for campo in _CAMPOS_NOTA:
+            val_old = velha.get(campo)
+            val_new = nova.get(campo)
+            if val_new is not None and val_old != val_new:
+                label = _LABEL_CAMPO[campo]
+                if val_old is None:
+                    diffs_notas.append(f"   Saiu {label}: {val_new:.1f}")
+                else:
+                    diffs_notas.append(f"   {label}: {val_old:.1f} → {val_new:.1f}")
+
+        if diffs_notas:
+            mudancas_notas.append({"disciplina": disc, "diffs": diffs_notas})
+
+        # Faltas
+        f_old = velha.get("faltas")
+        f_new = nova.get("faltas")
+        if f_new is not None and f_old is not None and f_old != f_new:
+            max_f = nova.get("max_faltas", 0)
+            pct = (f_new / max_f * 100) if max_f else 0
+            diff_line = f"   {f_old} → {f_new}/{max_f} ({pct:.0f}%)"
+            mudancas_faltas.append({"disciplina": disc, "diffs": [diff_line]})
+
+    return mudancas_notas, mudancas_faltas
+
+
+def _formatar_notificacao_nota(mudancas: list[dict]) -> str:
+    """Formata mensagem de notificação de notas."""
+    linhas = ["📢 *Atualização de notas!*\n"]
+    for m in mudancas:
+        linhas.append(f"📝 *{m['disciplina']}*")
+        linhas.extend(m["diffs"])
+        linhas.append("")
+    return "\n".join(linhas)
+
+
+def _formatar_notificacao_faltas(mudancas: list[dict]) -> str:
+    """Formata mensagem de notificação de faltas."""
+    linhas = ["📋 *Atualização de faltas!*\n"]
+    for m in mudancas:
+        linhas.append(f"📌 *{m['disciplina']}*")
+        linhas.extend(m["diffs"])
+        linhas.append("")
+    return "\n".join(linhas)
+
+
+def _check_notas_usuario(chat_id: int) -> tuple[list[dict], list[dict]] | None:
+    """Blocking: faz scrape de notas de um usuário e compara com cache.
+
+    Retorna (mudancas_notas, mudancas_faltas) ou None se erro/primeira vez.
+    Atualiza o cache no banco independentemente.
+    """
+    creds = db.get_credentials(chat_id)
+    if not creds:
+        return None
+
+    fam_login, fam_senha = creds
+    scraper = FAMScraper(fam_login, fam_senha, headless=True)
+    try:
+        if not scraper.fazer_login():
+            logger.warning("Job notas: falha login para chat_id=%d", chat_id)
+            return None
+        notas_novas, info = scraper.extrair_notas()
+    except Exception as e:
+        logger.error("Job notas: erro scrape chat_id=%d: %s", chat_id, e, exc_info=True)
+        return None
+    finally:
+        scraper.close()
+
+    if not notas_novas:
+        return None
+
+    # Compara com cache
+    notas_antigas = db.get_notas(chat_id)
+
+    # Atualiza cache sempre
+    db.set_notas(chat_id, notas_novas)
+    if info:
+        db.set_info_aluno(chat_id, info)
+
+    # Não notifica se cache estava vazio (primeira vez)
+    if not notas_antigas:
+        logger.info("Job notas: cache vazio para chat_id=%d, populando sem notificar.", chat_id)
+        return None
+
+    mudancas_notas, mudancas_faltas = _comparar_notas(notas_antigas, notas_novas)
+    if not mudancas_notas and not mudancas_faltas:
+        return None
+    return mudancas_notas, mudancas_faltas
+
+
+async def job_verificar_atualizacoes(context: ContextTypes.DEFAULT_TYPE):
+    """Job periódico: verifica notas de todos os usuários registrados."""
+    logger.info("Job notas: iniciando verificação periódica...")
+    usuarios = db.get_all_registered_users()
+    logger.info("Job notas: %d usuários registrados para verificar.", len(usuarios))
+
+    for user in usuarios:
+        chat_id = user["chat_id"]
+        try:
+            loop = asyncio.get_event_loop()
+            resultado = await loop.run_in_executor(None, _check_notas_usuario, chat_id)
+
+            if resultado:
+                mudancas_notas, mudancas_faltas = resultado
+
+                if mudancas_notas:
+                    texto = _formatar_notificacao_nota(mudancas_notas)
+                    await context.bot.send_message(
+                        chat_id=chat_id, text=texto, parse_mode="Markdown"
+                    )
+                    logger.info("Job notas: notificação de notas para chat_id=%d (%d disciplinas).",
+                                chat_id, len(mudancas_notas))
+
+                if mudancas_faltas:
+                    texto = _formatar_notificacao_faltas(mudancas_faltas)
+                    await context.bot.send_message(
+                        chat_id=chat_id, text=texto, parse_mode="Markdown"
+                    )
+                    logger.info("Job notas: notificação de faltas para chat_id=%d (%d disciplinas).",
+                                chat_id, len(mudancas_faltas))
+        except Exception as e:
+            logger.error("Job notas: erro ao processar chat_id=%d: %s", chat_id, e, exc_info=True)
+
+        # Sleep entre usuários para não sobrecarregar o portal
+        await asyncio.sleep(5)
+
+    logger.info("Job notas: verificação concluída.")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
@@ -382,6 +564,12 @@ def main():
     # Handlers de config/resetar
     app.add_handler(CommandHandler("config", cmd_config))
     app.add_handler(CommandHandler("resetar", cmd_resetar))
+
+    # Job periódico: verificar notas a cada 2 horas (primeiro check após 60s)
+    app.job_queue.run_repeating(
+        job_verificar_atualizacoes, interval=7200, first=60, name="verificar_atualizacoes"
+    )
+    logger.info("Job 'verificar_atualizacoes' agendado (intervalo=2h, first=60s)")
 
     logger.info("Bot rodando...")
     app.run_polling()

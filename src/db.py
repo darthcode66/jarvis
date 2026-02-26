@@ -212,6 +212,22 @@ def get_info_aluno(chat_id: int) -> dict | None:
         return None
 
 
+def get_all_registered_users() -> list[dict]:
+    """Retorna lista de dicts de todos os usuários com onboarding completo.
+
+    Usado pelo job periódico (job_verificar_atualizacoes) para iterar
+    sobre todos os usuários e checar notas/faltas novas.
+    """
+    con = _conn()
+    try:
+        rows = con.execute(
+            "SELECT * FROM usuarios WHERE onboarding_completo = 1"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
 def is_registered(chat_id: int) -> bool:
     """Verifica se o usuário completou o onboarding."""
     user = get_user(chat_id)

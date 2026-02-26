@@ -19,8 +19,11 @@ from fam_scraper import FAMScraper
 
 logger = logging.getLogger(__name__)
 
-# Estados do fluxo
-NOME, CASA, TRABALHO, HORARIO_TRABALHO, FAM_LOGIN, FAM_SENHA, CONFIRMA = range(7)
+# Estados do fluxo de onboarding
+# Ordem: nome → casa → trabalho → horário → login FAM → senha → termos de uso → confirmação
+# O estado TERMOS (aceite LGPD) é obrigatório — sem ele o cadastro não prossegue.
+# Se o usuário não aceitar, o registro parcial é removido do banco.
+NOME, CASA, TRABALHO, HORARIO_TRABALHO, FAM_LOGIN, FAM_SENHA, TERMOS, CONFIRMA = range(8)
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
@@ -129,6 +132,53 @@ async def receber_fam_senha(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.delete()
     except Exception:
         logger.warning("Não foi possível apagar a mensagem com a senha.")
+
+    await update.message.reply_text(
+        "📜 *Termos de Uso — FAMus Bot*\n\n"
+        "Ao continuar, você autoriza que o FAMus Bot:\n\n"
+        "1. Acesse o portal acadêmico da FAM *em seu nome*, "
+        "usando as credenciais que você forneceu\n"
+        "2. Consulte periodicamente suas notas, faltas e grade "
+        "para enviar notificações automáticas\n"
+        "3. Armazene seus dados de forma *criptografada* "
+        "exclusivamente para o funcionamento do serviço\n\n"
+        "Seus dados *nunca* serão compartilhados com terceiros. "
+        "Você pode apagar tudo a qualquer momento com /resetar.\n\n"
+        "Você aceita os termos? (*Aceito* / *Não aceito*)",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup(
+            [["Aceito", "Não aceito"]], one_time_keyboard=True, resize_keyboard=True
+        ),
+    )
+    return TERMOS
+
+
+async def receber_termos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Aceite dos termos de uso — LGPD compliance.
+
+    O usuário DEVE aceitar para prosseguir. Sem aceite, o cadastro parcial
+    é removido do banco e o fluxo encerra. Isso nos protege juridicamente
+    pois o usuário consente explicitamente com o acesso ao portal FAM.
+    """
+    resposta = update.message.text.strip().lower()
+
+    if resposta not in ("aceito", "aceitar", "sim", "s", "yes", "y"):
+        await update.message.reply_text(
+            "Sem problemas! Sem o aceite não consigo prosseguir.\n"
+            "Mande /start se mudar de ideia. 👋",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        chat_id = update.effective_chat.id
+        try:
+            import sqlite3
+            con = sqlite3.connect(db.DB_PATH)
+            con.execute("DELETE FROM usuarios WHERE chat_id = ? AND onboarding_completo = 0", (chat_id,))
+            con.commit()
+            con.close()
+        except Exception:
+            pass
+        context.user_data.clear()
+        return ConversationHandler.END
 
     # Monta resumo
     d = context.user_data
@@ -342,6 +392,7 @@ cadastro_handler = ConversationHandler(
         HORARIO_TRABALHO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_horario_trabalho)],
         FAM_LOGIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_fam_login)],
         FAM_SENHA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_fam_senha)],
+        TERMOS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_termos)],
         CONFIRMA: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirmar)],
     },
     fallbacks=[CommandHandler("cancelar", cancelar)],
