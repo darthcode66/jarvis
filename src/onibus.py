@@ -437,33 +437,73 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     texto = (
         "📖 *Comandos*\n\n"
-        "🚌 *Ônibus*\n"
-        "/onibus — resumo de todos os trajetos\n"
-        "/casa\\_trabalho — Casa → Trabalho\n"
-        "/trabalho\\_faculdade — Trabalho → Faculdade\n"
-        "/faculdade\\_casa — Faculdade → Casa\n"
-        "/casa\\_faculdade — Casa → Faculdade\n"
-        "/trabalho\\_casa — Trabalho → Casa\n\n"
         "🎓 *Aulas*\n"
         "/aula — grade horária (hoje, amanhã, semana)\n\n"
         "📚 *FAM*\n"
-        "/atividades — consultar atividades do portal\n\n"
+        "/notas — boletim (1x/semana Free)\n"
+        "/grade — atualizar grade do portal\n\n"
+        "⭐ *Pro*\n"
+        "/onibus — horários de ônibus\n"
+        "/faltas — faltas por disciplina\n"
+        "/simular — quanto preciso pra passar\n"
+        "/dp — matérias reprovadas\n"
+        "/atividades — atividades do portal\n\n"
+        "💳 *Plano*\n"
+        "/assinar — assinar plano Pro\n"
+        "/plano — ver seu plano\n\n"
         "⚙️ *Geral*\n"
-        "/start — menu com botões\n"
+        "/start — menu principal\n"
         "/help — esta mensagem\n"
-        "/config — ver/editar seus dados\n"
-        "/clear — limpar conversa"
+        "/config — ver seus dados\n"
+        "/resetar — resetar cadastro\n"
+        "/clear — limpar conversa com IA\n\n"
+        "📬 *Contato*\n"
+        "/suporte — pedir ajuda\n"
+        "/sugestoes — enviar ideia\n\n"
+        "_⭐ = exclusivo Pro_"
     )
     await update.message.reply_text(texto, parse_mode="Markdown")
 
 
 async def cmd_onibus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    db.log_evento(chat_id, "cmd_onibus")
+
+    if not db.is_pro(chat_id):
+        await update.message.reply_text(
+            "⭐ Recurso exclusivo Pro!\n"
+            "Use /assinar pra desbloquear (R$ 9,90/mês)\n"
+            "7 dias grátis no cadastro!"
+        )
+        return
+
+    user = db.get_user(chat_id)
+    transporte = (user or {}).get("transporte", "sou")
+    if transporte != "sou":
+        transporte_labels = {"emtu": "EMTU / Intermunicipal", "carro": "Carro / Carona", "outro": "Outro"}
+        label = transporte_labels.get(transporte, transporte)
+        await update.message.reply_text(
+            f"As rotas de ônibus SOU Americana não se aplicam ao seu caso "
+            f"(transporte: {label}).\n\n"
+            "Use /config pra ver seus dados ou /resetar e /start pra alterar.",
+        )
+        return
+
     await update.message.reply_text(
         resumo_trajetos(), reply_markup=menu_keyboard()
     )
 
 
 async def cmd_trajeto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    if not db.is_pro(chat_id):
+        await update.message.reply_text(
+            "⭐ Recurso exclusivo Pro!\n"
+            "Use /assinar pra desbloquear (R$ 9,90/mês)\n"
+            "7 dias grátis no cadastro!"
+        )
+        return
+
     comando = update.message.text.lstrip("/").split("@")[0]
     if comando in HORARIOS:
         await update.message.reply_text(
@@ -529,6 +569,13 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def mensagem_generica(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    user_tg = update.effective_user
+    db.registrar_lead(chat_id, username=getattr(user_tg, 'username', None), primeiro_nome=getattr(user_tg, 'first_name', None))
+
+    # Se estamos aguardando input especial (email, suporte, sugestão), não processar como IA
+    import monitor
+    if monitor._aguardando_email.get(chat_id) or monitor._aguardando_texto.get(chat_id):
+        return
 
     # Gate de cadastro: se não registrado, manda cadastrar
     if not db.is_registered(chat_id):
@@ -537,6 +584,7 @@ async def mensagem_generica(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
+    db.log_evento(chat_id, "msg_ia")
     from gemini import perguntar
     from famus import responder
 

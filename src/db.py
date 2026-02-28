@@ -6,8 +6,12 @@ import json
 import logging
 import os
 import sqlite3
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from crypto import encrypt, decrypt
+
+TZ = ZoneInfo("America/Sao_Paulo")
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +79,94 @@ def init_db() -> None:
             con.execute("ALTER TABLE usuarios ADD COLUMN info_aluno TEXT")
             con.commit()
             logger.info("Coluna 'info_aluno' adicionada à tabela usuarios.")
+        if "historico" not in cols:
+            con.execute("ALTER TABLE usuarios ADD COLUMN historico TEXT")
+            con.commit()
+            logger.info("Coluna 'historico' adicionada à tabela usuarios.")
+        if "plano" not in cols:
+            con.execute("ALTER TABLE usuarios ADD COLUMN plano TEXT DEFAULT 'free'")
+            con.commit()
+            logger.info("Coluna 'plano' adicionada à tabela usuarios.")
+        if "plano_expira" not in cols:
+            con.execute("ALTER TABLE usuarios ADD COLUMN plano_expira TEXT")
+            con.commit()
+            logger.info("Coluna 'plano_expira' adicionada à tabela usuarios.")
+        if "trial_usado" not in cols:
+            con.execute("ALTER TABLE usuarios ADD COLUMN trial_usado INTEGER DEFAULT 0")
+            con.commit()
+            logger.info("Coluna 'trial_usado' adicionada à tabela usuarios.")
+        if "turno" not in cols:
+            con.execute("ALTER TABLE usuarios ADD COLUMN turno TEXT DEFAULT 'noturno'")
+            con.commit()
+            logger.info("Coluna 'turno' adicionada à tabela usuarios.")
+        if "horario_entrada_trabalho" not in cols:
+            con.execute("ALTER TABLE usuarios ADD COLUMN horario_entrada_trabalho TEXT")
+            con.commit()
+            logger.info("Coluna 'horario_entrada_trabalho' adicionada à tabela usuarios.")
+        if "transporte" not in cols:
+            con.execute("ALTER TABLE usuarios ADD COLUMN transporte TEXT DEFAULT 'sou'")
+            con.commit()
+            logger.info("Coluna 'transporte' adicionada à tabela usuarios.")
+
+        # Tabela de pagamentos
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS pagamentos (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id     INTEGER NOT NULL,
+                tipo        TEXT NOT NULL,
+                mp_id       TEXT NOT NULL,
+                status      TEXT DEFAULT 'pending',
+                valor       REAL,
+                criado_em   TEXT DEFAULT CURRENT_TIMESTAMP,
+                aprovado_em TEXT
+            )
+        """)
+        con.commit()
+
+        # Tabela de sugestões
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS sugestoes (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id     INTEGER NOT NULL,
+                texto       TEXT NOT NULL,
+                criado_em   TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        con.commit()
+
+        # Tabela de tickets de suporte
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS suporte (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id     INTEGER NOT NULL,
+                texto       TEXT NOT NULL,
+                criado_em   TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        con.commit()
+
+        # Tabela de eventos / analytics
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS eventos (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id     INTEGER NOT NULL,
+                tipo        TEXT NOT NULL,
+                timestamp   TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        con.commit()
+
+        # Tabela de leads (quem interagiu mas pode não ter cadastrado)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS leads (
+                chat_id         INTEGER PRIMARY KEY,
+                username        TEXT,
+                primeiro_nome   TEXT,
+                primeiro_contato TEXT DEFAULT CURRENT_TIMESTAMP,
+                ultimo_contato  TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        con.commit()
 
         # Seed: migra Pedro se TELEGRAM_CHAT_ID existe e banco está vazio
         chat_id_str = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -125,11 +217,12 @@ def get_user(chat_id: int) -> dict | None:
 
 
 def create_user(chat_id: int, nome: str) -> None:
-    """Cria registro básico (onboarding ainda não completo)."""
+    """Cria registro básico ou atualiza nome se já existe (re-cadastro após reset)."""
     con = _conn()
     try:
         con.execute(
-            "INSERT OR IGNORE INTO usuarios (chat_id, nome) VALUES (?, ?)",
+            "INSERT INTO usuarios (chat_id, nome) VALUES (?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET nome = excluded.nome",
             (chat_id, nome),
         )
         con.commit()
@@ -212,6 +305,22 @@ def get_info_aluno(chat_id: int) -> dict | None:
         return None
 
 
+def set_historico(chat_id: int, historico_list: list[dict]) -> None:
+    """Serializa e salva histórico no banco."""
+    update_user(chat_id, historico=json.dumps(historico_list, ensure_ascii=False))
+
+
+def get_historico(chat_id: int) -> list[dict] | None:
+    """Retorna histórico deserializado ou None."""
+    user = get_user(chat_id)
+    if not user or not user.get("historico"):
+        return None
+    try:
+        return json.loads(user["historico"])
+    except json.JSONDecodeError:
+        return None
+
+
 def get_all_registered_users() -> list[dict]:
     """Retorna lista de dicts de todos os usuários com onboarding completo.
 
@@ -232,3 +341,253 @@ def is_registered(chat_id: int) -> bool:
     """Verifica se o usuário completou o onboarding."""
     user = get_user(chat_id)
     return user is not None and bool(user["onboarding_completo"])
+
+
+# ── Eventos / Analytics ─────────────────────────────────────────────────────
+
+
+def log_evento(chat_id: int, tipo: str) -> None:
+    """Registra evento de interação (leve, sem conteúdo de mensagem)."""
+    con = _conn()
+    try:
+        con.execute(
+            "INSERT INTO eventos (chat_id, tipo) VALUES (?, ?)",
+            (chat_id, tipo),
+        )
+        con.commit()
+    except Exception as e:
+        logger.warning("Erro ao logar evento: %s", e)
+    finally:
+        con.close()
+
+
+def ultimo_evento(chat_id: int, tipo: str) -> str | None:
+    """Retorna timestamp ISO do último evento desse tipo, ou None."""
+    con = _conn()
+    try:
+        row = con.execute(
+            "SELECT timestamp FROM eventos WHERE chat_id = ? AND tipo = ? ORDER BY id DESC LIMIT 1",
+            (chat_id, tipo),
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        con.close()
+
+
+def registrar_lead(chat_id: int, username: str | None = None, primeiro_nome: str | None = None) -> None:
+    """Registra ou atualiza lead (qualquer pessoa que interagiu com o bot)."""
+    con = _conn()
+    try:
+        con.execute(
+            """INSERT INTO leads (chat_id, username, primeiro_nome)
+               VALUES (?, ?, ?)
+               ON CONFLICT(chat_id) DO UPDATE SET
+                   ultimo_contato = CURRENT_TIMESTAMP,
+                   username = COALESCE(excluded.username, leads.username),
+                   primeiro_nome = COALESCE(excluded.primeiro_nome, leads.primeiro_nome)""",
+            (chat_id, username, primeiro_nome),
+        )
+        con.commit()
+    except Exception as e:
+        logger.warning("Erro ao registrar lead: %s", e)
+    finally:
+        con.close()
+
+
+# ── Plano / Pagamentos ─────────────────────────────────────────────────────
+
+
+def set_plano(chat_id: int, plano: str, expira: str | None) -> None:
+    """Define plano do usuário. expira = ISO datetime ou None."""
+    update_user(chat_id, plano=plano, plano_expira=expira)
+
+
+def get_plano(chat_id: int) -> dict | None:
+    """Retorna {plano, plano_expira, trial_usado} ou None."""
+    user = get_user(chat_id)
+    if not user:
+        return None
+    return {
+        "plano": user.get("plano") or "free",
+        "plano_expira": user.get("plano_expira"),
+        "trial_usado": user.get("trial_usado") or 0,
+    }
+
+
+def is_pro(chat_id: int) -> bool:
+    """Checa se o usuário tem plano Pro ou Trial ativo (não expirado)."""
+    info = get_plano(chat_id)
+    if not info:
+        return False
+    plano = info["plano"]
+    if plano not in ("pro", "trial"):
+        return False
+    expira = info["plano_expira"]
+    if not expira:
+        return plano in ("pro", "trial")
+    try:
+        dt_expira = datetime.fromisoformat(expira)
+        if dt_expira.tzinfo is None:
+            dt_expira = dt_expira.replace(tzinfo=TZ)
+        return datetime.now(TZ) < dt_expira
+    except (ValueError, TypeError):
+        return False
+
+
+def ativar_trial(chat_id: int) -> bool:
+    """Ativa trial de 7 dias se ainda não usado. Retorna True se ativou."""
+    info = get_plano(chat_id)
+    if info and info["trial_usado"]:
+        return False
+    expira = (datetime.now(TZ) + timedelta(days=7)).isoformat()
+    con = _conn()
+    try:
+        con.execute(
+            "UPDATE usuarios SET plano = 'trial', plano_expira = ?, trial_usado = 1 WHERE chat_id = ?",
+            (expira, chat_id),
+        )
+        con.commit()
+        return True
+    finally:
+        con.close()
+
+
+def criar_pagamento(chat_id: int, tipo: str, mp_id: str, valor: float) -> None:
+    """Registra pagamento pendente na tabela pagamentos."""
+    con = _conn()
+    try:
+        con.execute(
+            "INSERT INTO pagamentos (chat_id, tipo, mp_id, valor) VALUES (?, ?, ?, ?)",
+            (chat_id, tipo, mp_id, valor),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def atualizar_pagamento(mp_id: str, status: str) -> None:
+    """Atualiza status de um pagamento pelo ID do Mercado Pago."""
+    con = _conn()
+    try:
+        aprovado_em = datetime.now(TZ).isoformat() if status == "approved" else None
+        con.execute(
+            "UPDATE pagamentos SET status = ?, aprovado_em = COALESCE(?, aprovado_em) WHERE mp_id = ?",
+            (status, aprovado_em, mp_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def get_pagamento_pendente(chat_id: int) -> dict | None:
+    """Retorna o pagamento pendente mais recente do usuário ou None."""
+    con = _conn()
+    try:
+        row = con.execute(
+            "SELECT * FROM pagamentos WHERE chat_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
+            (chat_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        con.close()
+
+
+def get_usuarios_pro_expirados() -> list[dict]:
+    """Retorna usuários Pro/Trial cujo plano_expira já passou."""
+    con = _conn()
+    try:
+        agora = datetime.now(TZ).isoformat()
+        rows = con.execute(
+            "SELECT * FROM usuarios WHERE plano IN ('pro', 'trial') AND plano_expira IS NOT NULL AND plano_expira < ?",
+            (agora,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def get_pagamento_por_chat(chat_id: int, tipo: str) -> dict | None:
+    """Retorna pagamento mais recente de um tipo para o usuário."""
+    con = _conn()
+    try:
+        row = con.execute(
+            "SELECT * FROM pagamentos WHERE chat_id = ? AND tipo = ? ORDER BY id DESC LIMIT 1",
+            (chat_id, tipo),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        con.close()
+
+
+# ── Sugestões / Suporte ────────────────────────────────────────────────────
+
+
+def salvar_sugestao(chat_id: int, texto: str) -> None:
+    con = _conn()
+    try:
+        con.execute("INSERT INTO sugestoes (chat_id, texto) VALUES (?, ?)", (chat_id, texto))
+        con.commit()
+    finally:
+        con.close()
+
+
+def salvar_suporte(chat_id: int, texto: str) -> None:
+    con = _conn()
+    try:
+        con.execute("INSERT INTO suporte (chat_id, texto) VALUES (?, ?)", (chat_id, texto))
+        con.commit()
+    finally:
+        con.close()
+
+
+def get_stats() -> dict:
+    """Retorna estatísticas gerais do bot."""
+    con = _conn()
+    try:
+        stats = {}
+
+        # Leads totais
+        stats["leads_total"] = con.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+
+        # Usuários cadastrados
+        stats["usuarios_cadastrados"] = con.execute(
+            "SELECT COUNT(*) FROM usuarios WHERE onboarding_completo = 1"
+        ).fetchone()[0]
+
+        # Usuários que iniciaram mas não completaram
+        stats["onboarding_incompleto"] = con.execute(
+            "SELECT COUNT(*) FROM usuarios WHERE onboarding_completo = 0"
+        ).fetchone()[0]
+
+        # Eventos hoje
+        stats["eventos_hoje"] = con.execute(
+            "SELECT COUNT(*) FROM eventos WHERE DATE(timestamp) = DATE('now')"
+        ).fetchone()[0]
+
+        # Eventos últimos 7 dias
+        stats["eventos_7d"] = con.execute(
+            "SELECT COUNT(*) FROM eventos WHERE timestamp >= DATETIME('now', '-7 days')"
+        ).fetchone()[0]
+
+        # Top comandos (últimos 7 dias)
+        rows = con.execute(
+            """SELECT tipo, COUNT(*) as cnt FROM eventos
+               WHERE timestamp >= DATETIME('now', '-7 days')
+               GROUP BY tipo ORDER BY cnt DESC LIMIT 10"""
+        ).fetchall()
+        stats["top_comandos_7d"] = [(r[0], r[1]) for r in rows]
+
+        # Usuários ativos (últimos 7 dias)
+        stats["usuarios_ativos_7d"] = con.execute(
+            "SELECT COUNT(DISTINCT chat_id) FROM eventos WHERE timestamp >= DATETIME('now', '-7 days')"
+        ).fetchone()[0]
+
+        # Leads que não cadastraram
+        stats["leads_sem_cadastro"] = con.execute(
+            """SELECT COUNT(*) FROM leads
+               WHERE chat_id NOT IN (SELECT chat_id FROM usuarios WHERE onboarding_completo = 1)"""
+        ).fetchone()[0]
+
+        return stats
+    finally:
+        con.close()

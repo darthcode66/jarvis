@@ -378,7 +378,7 @@ class FAMScraper:
             logger.error("Erro ao extrair notas: %s", e, exc_info=True)
             return None, None
 
-    def extrair_grade(self):
+    def extrair_grade(self, turno: str = "noturno"):
         """Navega até a página de grade e extrai a grade horária."""
         try:
             logger.info("Navegando para página de grade horária...")
@@ -388,12 +388,43 @@ class FAMScraper:
             time.sleep(3)
 
             html = self.driver.page_source
-            grade = parse_grade_html(html)
+            grade = parse_grade_html(html, turno=turno)
             logger.info("Grade extraída: %s", {k: len(v) for k, v in grade.items()})
             return grade
 
         except Exception as e:
             logger.error("Erro ao extrair grade: %s", e, exc_info=True)
+            return None
+
+    def extrair_historico(self):
+        """Navega até a página de histórico e extrai disciplinas cursadas.
+
+        Retorna lista de dicts ou None em caso de erro:
+        [{"disciplina": str, "semestre": str, "situacao": str, "media_final": float|None}]
+        """
+        try:
+            logger.info("Navegando para página de histórico (extrato de notas)...")
+            self.driver.get(
+                "https://www.famportal.com.br/fam/pg_portal.php?"
+                "frame=frame_alu_extrato_notas.php"
+            )
+            time.sleep(3)
+
+            html = self.driver.page_source
+
+            # Salva HTML para debug
+            debug_path = os.path.join(os.path.dirname(__file__), '..', 'logs', 'historico_debug.html')
+            os.makedirs(os.path.dirname(debug_path), exist_ok=True)
+            with open(debug_path, 'w', encoding='utf-8') as f:
+                f.write(html)
+            logger.info("HTML de histórico salvo em %s", debug_path)
+
+            historico = parse_historico_html(html)
+            logger.info("Histórico extraído: %d disciplinas", len(historico) if historico else 0)
+            return historico
+
+        except Exception as e:
+            logger.error("Erro ao extrair histórico: %s", e, exc_info=True)
             return None
 
     def close(self):
@@ -403,21 +434,40 @@ class FAMScraper:
             logger.info("Driver fechado")
 
 
-# ── Mapeamento aulas → horários (noturno FAM) ──────────────────────────────
+# ── Mapeamento aulas → horários por turno ────────────────────────────────
 
-HORARIOS = {
-    "P1": ("", ""),          # horário variável (sábado / ativ. complementar)
-    "01": ("19:00", "19:50"),
-    "02": ("19:50", "20:40"),
-    "03": ("20:50", "21:40"),
-    "04": ("21:40", "22:30"),
+HORARIOS_POR_TURNO = {
+    "noturno": {
+        "P1": ("", ""),
+        "01": ("19:00", "19:50"),
+        "02": ("19:50", "20:40"),
+        "03": ("20:50", "21:40"),
+        "04": ("21:40", "22:30"),
+    },
+    "matutino": {
+        "P1": ("", ""),
+        "01": ("", ""),  # placeholder — será preenchido depois
+        "02": ("", ""),
+        "03": ("", ""),
+        "04": ("", ""),
+    },
+    "vespertino": {
+        "P1": ("", ""),
+        "01": ("", ""),  # placeholder — será preenchido depois
+        "02": ("", ""),
+        "03": ("", ""),
+        "04": ("", ""),
+    },
 }
+
+# Backward compatible alias
+HORARIOS = HORARIOS_POR_TURNO["noturno"]
 
 # Colunas da tabela: SEG=0, TER=1, QUA=2, QUI=3, SEX=4, SAB=5
 COLUNAS_DIA = {1: "0", 2: "1", 3: "2", 4: "3", 5: "4", 6: "5"}
 
 
-def parse_grade_html(html: str) -> dict:
+def parse_grade_html(html: str, turno: str = "noturno") -> dict:
     """Parseia HTML da página de grade e retorna dict no formato do banco.
 
     Estrutura real do portal:
@@ -444,6 +494,8 @@ def parse_grade_html(html: str) -> dict:
         logger.warning("Tabela de grade não encontrada no HTML")
         return {str(d): [] for d in range(6)}
 
+    horarios = HORARIOS_POR_TURNO.get(turno, HORARIOS_POR_TURNO["noturno"])
+
     # Pega só as <tr> diretas da tabela (ignora <tr> de tabelas aninhadas)
     tbody = tabela.find("tbody") or tabela
     linhas = tbody.find_all("tr", recursive=False)
@@ -463,7 +515,7 @@ def parse_grade_html(html: str) -> dict:
 
         # Primeira célula = label da aula (P1, 01, 02, 03, 04)
         aula_label = celulas[0].get_text(strip=True)
-        if aula_label not in HORARIOS:
+        if aula_label not in horarios:
             continue
 
         # Células restantes: SEG(1), TER(2), QUA(3), QUI(4), SEX(5), SAB(6)
@@ -482,7 +534,7 @@ def parse_grade_html(html: str) -> dict:
                     grade_crua[dia_str].append((aula_label, materia, prof))
 
     # Agrupa slots consecutivos com mesma matéria por dia
-    return _agrupar_grade(grade_crua)
+    return _agrupar_grade(grade_crua, turno)
 
 
 def _extrair_celula(celula) -> tuple[str, str]:
@@ -524,11 +576,12 @@ def _limpar_nome_materia(nome: str) -> str:
     return re.sub(r"\s*-\s*(?:Ciência da Computação|Engenharia|Administração|Direito|Pedagogia).*$", "", nome).strip()
 
 
-def _agrupar_grade(grade_crua: dict) -> dict:
+def _agrupar_grade(grade_crua: dict, turno: str = "noturno") -> dict:
     """Agrupa slots por matéria e calcula início/fim de cada bloco.
 
     Lida com múltiplas matérias no mesmo slot (ex: Extensão + Tópicos na aula 03-04).
     """
+    horarios = HORARIOS_POR_TURNO.get(turno, HORARIOS_POR_TURNO["noturno"])
     ordem_aulas = ["P1", "01", "02", "03", "04"]
 
     resultado = {}
@@ -549,8 +602,8 @@ def _agrupar_grade(grade_crua: dict) -> dict:
         blocos = []
         for materia, (prof, aulas) in materias.items():
             aulas.sort(key=lambda a: ordem_aulas.index(a) if a in ordem_aulas else 99)
-            inicio = HORARIOS.get(aulas[0], ("", ""))[0]
-            fim = HORARIOS.get(aulas[-1], ("", ""))[1]
+            inicio = horarios.get(aulas[0], ("", ""))[0]
+            fim = horarios.get(aulas[-1], ("", ""))[1]
             blocos.append({"materia": materia, "prof": prof, "inicio": inicio, "fim": fim})
 
         # Ordena por horário de início
@@ -643,15 +696,20 @@ def parse_notas_html(html: str) -> list[dict] | None:
         # Verifica se N2/N3 estão disponíveis (colspan "Não disponível")
         nao_disponivel = any("Não disponível" in td.get_text() for td in tds)
 
-        # N1 sempre na posição 2
+        # N1 sempre na posição 2, Peso1 na posição 3
         n1 = _parse_nota_valor(tds[2].get_text(strip=True))
+        peso1 = _parse_nota_valor(tds[3].get_text(strip=True)) if len(tds) >= 17 and not nao_disponivel else None
 
         # N2 e N3 dependem de disponibilidade
         n2 = None
         n3 = None
+        peso2 = None
+        peso3 = None
         if not nao_disponivel and len(tds) >= 17:
             n2 = _parse_nota_valor(tds[5].get_text(strip=True))
+            peso2 = _parse_nota_valor(tds[6].get_text(strip=True))
             n3 = _parse_nota_valor(tds[8].get_text(strip=True))
+            peso3 = _parse_nota_valor(tds[9].get_text(strip=True))
 
         # MS (Média Semestral) — classe única ColunaMP
         ms_td = row.find("td", class_="ColunaMP")
@@ -670,8 +728,11 @@ def parse_notas_html(html: str) -> list[dict] | None:
         notas.append({
             "disciplina": disciplina,
             "n1": n1,
+            "peso1": peso1,
             "n2": n2,
+            "peso2": peso2,
             "n3": n3,
+            "peso3": peso3,
             "media_semestral": ms,
             "media_final": mf,
             "faltas": faltas,
@@ -683,6 +744,74 @@ def parse_notas_html(html: str) -> list[dict] | None:
         return None
 
     return notas
+
+
+# ── Parser de histórico ──────────────────────────────────────────────────────
+
+
+def parse_historico_html(html: str) -> list[dict] | None:
+    """Parseia HTML da página de extrato de notas do portal FAM.
+
+    Estrutura (table class="Grade"):
+      - Linha de semestre: 1 <td> com colspan, texto "SEMESTRE 01"
+      - Header: ANO | DISCIPLINA | CARGA | N1 | N2 | N3 | AR | MÉDIA | FALTAS | SITUAÇÃO
+      - Dados: 10 <td>, disciplina com código prefixado ("2222 Ambientação Universitária")
+
+    Retorno: [{"disciplina": str, "semestre": str, "situacao": str, "media_final": float|None}]
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    tabela = soup.find("table", class_="Grade")
+    if not tabela:
+        logger.warning("Tabela Grade não encontrada no HTML de histórico")
+        return None
+
+    historico = []
+    semestre_atual = ""
+
+    for row in tabela.find_all("tr"):
+        tds = row.find_all("td")
+        if not tds:
+            continue
+
+        # Linha de semestre: 1 célula com colspan, texto "SEMESTRE XX"
+        if len(tds) == 1:
+            texto = tds[0].get_text(strip=True)
+            match_sem = re.match(r"SEMESTRE\s+(\d+)", texto)
+            if match_sem:
+                semestre_atual = f"{int(match_sem.group(1))}º semestre"
+            continue
+
+        # Pula headers (ANO | DISCIPLINA | ...)
+        if len(tds) < 10:
+            continue
+        primeiro = tds[0].get_text(strip=True)
+        if primeiro == "ANO":
+            continue
+
+        # Linha de dados: ANO(0) | DISCIPLINA(1) | CARGA(2) | N1(3) | N2(4) | N3(5) | AR(6) | MÉDIA(7) | FALTAS(8) | SITUAÇÃO(9)
+        disc_raw = tds[1].get_text(strip=True)
+        # Remove código numérico prefixado ("2222 Nome" → "Nome")
+        disc_clean = re.sub(r"^\d+\s+", "", disc_raw)
+        disciplina = _limpar_nome_materia(disc_clean)
+
+        media_texto = tds[7].get_text(strip=True)
+        media_final = _parse_nota_valor(media_texto)
+
+        situacao = tds[9].get_text(strip=True)
+
+        if disciplina and situacao:
+            historico.append({
+                "disciplina": disciplina,
+                "semestre": semestre_atual,
+                "situacao": situacao,
+                "media_final": media_final,
+            })
+
+    if not historico:
+        logger.warning("Nenhuma disciplina encontrada no histórico — verifique logs/historico_debug.html")
+        return None
+
+    return historico
 
 
 if __name__ == "__main__":

@@ -57,11 +57,14 @@ GRADE_PADRAO = {
 GRADE = GRADE_PADRAO
 
 
+_GRADE_VAZIA = {0: [], 1: [], 2: [], 3: [], 4: [], 5: []}
+
+
 def _load_grade(chat_id: int) -> dict:
-    """Carrega grade do banco. Converte chaves string→int. Fallback: GRADE_PADRAO."""
+    """Carrega grade do banco. Converte chaves string→int. Fallback: grade vazia."""
     grade_raw = db.get_grade(chat_id)
     if not grade_raw:
-        return GRADE_PADRAO
+        return _GRADE_VAZIA
     # Chaves JSON são strings ("0","1"…), converter para int
     return {int(k): v for k, v in grade_raw.items()}
 
@@ -69,7 +72,7 @@ def _load_grade(chat_id: int) -> dict:
 def _formatar_dia(dia: int, data: datetime | None = None, grade: dict | None = None) -> str:
     """Formata as aulas de um dia."""
     if grade is None:
-        grade = GRADE_PADRAO
+        grade = _GRADE_VAZIA
     aulas = grade.get(dia)
     nome = DIAS_NOME[dia]
 
@@ -104,7 +107,7 @@ def _aulas_amanha(grade: dict | None = None) -> str:
 
 def _aulas_semana(grade: dict | None = None) -> str:
     if grade is None:
-        grade = GRADE_PADRAO
+        grade = _GRADE_VAZIA
     hoje = datetime.now(TZ)
     seg = hoje - timedelta(days=hoje.weekday())
 
@@ -140,6 +143,7 @@ def _menu_aula() -> InlineKeyboardMarkup:
 
 async def cmd_aula(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    db.log_evento(chat_id, "cmd_aula")
     grade = _load_grade(chat_id)
     await update.message.reply_text(_aulas_hoje(grade), reply_markup=_menu_aula())
 

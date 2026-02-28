@@ -59,10 +59,16 @@ def _local_estimado(user: dict, grade: dict) -> str:
 
     if dia >= 5:
         return "casa"
-    if hora < 8:
-        return "casa"
 
     if tem_trabalho:
+        # Horário de entrada no trabalho
+        entrada_str = user.get("horario_entrada_trabalho") or "08:00"
+        try:
+            parts_e = entrada_str.split(":")
+            entrada_hora = int(parts_e[0]) + int(parts_e[1]) / 60
+        except (ValueError, IndexError):
+            entrada_hora = 8.0
+
         # Horário de saída do trabalho
         saida_str = user.get("horario_saida_trabalho") or "18:00"
         try:
@@ -71,6 +77,8 @@ def _local_estimado(user: dict, grade: dict) -> str:
         except (ValueError, IndexError):
             saida_hora = 18.0
 
+        if hora < entrada_hora:
+            return "casa"
         if hora < saida_hora:
             return "trabalho"
 
@@ -152,8 +160,14 @@ def _contexto_dinamico(user: dict, grade: dict) -> str:
     if not user.get("endereco_trabalho"):
         relevantes = [r for r in relevantes if "trabalho" not in r]
 
+    turno = (user.get("turno") or "noturno").capitalize()
+    transporte = user.get("transporte") or "sou"
+    transporte_labels = {"sou": "Ônibus SOU Americana", "emtu": "EMTU / Intermunicipal", "carro": "Carro / Carona", "outro": "Outro"}
+
     partes = [
         f"Agora: {agora.strftime('%A, %d/%m/%Y %H:%M')}",
+        f"Turno: {turno}",
+        f"Transporte: {transporte_labels.get(transporte, transporte)}",
         f"Localização estimada: {local_info['nome']} ({local_info['bairro']})",
     ]
 
@@ -198,8 +212,14 @@ def _contexto_dinamico(user: dict, grade: dict) -> str:
 
     # Notas e faltas (do cache no banco)
     notas = db.get_notas(user["chat_id"])
+    eh_pro = db.is_pro(user["chat_id"])
     if notas:
-        partes.append("\n=== NOTAS E FALTAS ===")
+        if eh_pro:
+            from monitor import _calcular_simulacao
+            partes.append("\n=== NOTAS, FALTAS E SIMULAÇÃO ===")
+        else:
+            partes.append("\n=== NOTAS E FALTAS ===")
+
         for n in notas:
             disc = n.get("disciplina", "?")
             n1 = n.get("n1")
@@ -217,38 +237,57 @@ def _contexto_dinamico(user: dict, grade: dict) -> str:
                 nota_parts.append(f"N2={n2:.1f}")
             if n3 is not None:
                 nota_parts.append(f"N3={n3:.1f}")
-            if ms is not None:
+            if ms is not None and not (ms == 0.0 and n1 is None and n2 is None and n3 is None):
                 nota_parts.append(f"MS={ms:.1f}")
             if mf is not None:
                 nota_parts.append(f"MF={mf:.1f}")
             notas_str = ", ".join(nota_parts) if nota_parts else "sem notas lançadas"
 
             faltas_str = f"faltas: {faltas}/{max_f}" if max_f else "sem controle de faltas"
-            partes.append(f"  {disc}: {notas_str} | {faltas_str}")
 
-    # Próximos ônibus das rotas relevantes (com Maps links)
-    partes.append("\n=== PRÓXIMOS ÔNIBUS (rotas relevantes) ===")
-    for key in relevantes:
-        trajeto = HORARIOS.get(key)
-        if not trajeto:
-            continue
-        proximos = [h for h in trajeto["horarios"] if h["hora"] >= hora_str]
+            if eh_pro:
+                sim = _calcular_simulacao(n)
+                partes.append(f"  {disc}: {notas_str} | {faltas_str} | Simulação: {sim['texto']}")
+            else:
+                partes.append(f"  {disc}: {notas_str} | {faltas_str}")
 
-        partes.append(f"ROTA: {trajeto['nome']}")
-        if not proximos:
-            partes.append("  Encerrado hoje.")
-            continue
+    # Matérias reprovadas / DPs (do cache no banco)
+    historico = db.get_historico(user["chat_id"])
+    if historico:
+        reprovados = [h for h in historico if "reprovado" in h.get("situacao", "").lower()]
+        if reprovados:
+            partes.append(f"\n=== DEPENDÊNCIAS (DPs) — {len(reprovados)} matérias ===")
+            for h in reprovados:
+                mf = h.get("media_final")
+                mf_str = f" (MF: {mf:.1f})" if mf is not None else ""
+                partes.append(f"  {h['disciplina']} — Reprovado no {h['semestre']}{mf_str}")
+        else:
+            partes.append("\n=== DEPENDÊNCIAS (DPs) === Nenhuma DP, histórico limpo.")
 
-        for h in proximos[:5]:
-            maps = _maps_link(h['embarque'])
-            partes.append(
-                f"  {h['hora']} L.{h['linha']} → {h['chegada']}"
-                f" | Embarque: {h['embarque']}"
-                f" | Maps: {maps}"
-            )
-        restantes = len(proximos) - 5
-        if restantes > 0:
-            partes.append(f"  (+{restantes} restantes, consulte a tabela completa)")
+    # Próximos ônibus das rotas relevantes — só para SOU + Pro
+    if transporte == "sou" and eh_pro:
+        partes.append("\n=== PRÓXIMOS ÔNIBUS (rotas relevantes) ===")
+        for key in relevantes:
+            trajeto = HORARIOS.get(key)
+            if not trajeto:
+                continue
+            proximos = [h for h in trajeto["horarios"] if h["hora"] >= hora_str]
+
+            partes.append(f"ROTA: {trajeto['nome']}")
+            if not proximos:
+                partes.append("  Encerrado hoje.")
+                continue
+
+            for h in proximos[:5]:
+                maps = _maps_link(h['embarque'])
+                partes.append(
+                    f"  {h['hora']} L.{h['linha']} → {h['chegada']}"
+                    f" | Embarque: {h['embarque']}"
+                    f" | Maps: {maps}"
+                )
+            restantes = len(proximos) - 5
+            if restantes > 0:
+                partes.append(f"  (+{restantes} restantes, consulte a tabela completa)")
 
     return "\n".join(partes)
 
@@ -284,12 +323,57 @@ def build_system_prompt(user: dict, grade: dict) -> str:
 
     grade_text = _build_grade_text(grade)
 
+    turno = (user.get("turno") or "noturno").capitalize()
+    horario_entrada = user.get("horario_entrada_trabalho") or ""
+
+    transporte = user.get("transporte") or "sou"
+    transporte_labels = {"sou": "Ônibus SOU Americana", "emtu": "EMTU / Intermunicipal", "carro": "Carro / Carona", "outro": "Outro"}
+
     dados_usuario = f"""Dados de {nome}:
 - Mora em: {casa}"""
     if trabalho:
         dados_usuario += f"\n- Trabalha em: {trabalho}"
-        dados_usuario += f"\n- Sai do trabalho às {horario_saida} (considere ~15 min para chegar ao ponto de ônibus)"
+        if horario_entrada:
+            dados_usuario += f"\n- Entra no trabalho às {horario_entrada}"
+        dados_usuario += f"\n- Sai do trabalho às {horario_saida}"
+        if transporte == "sou":
+            dados_usuario += " (considere ~15 min para chegar ao ponto de ônibus)"
     dados_usuario += f"\n- Estuda na {faculdade}"
+    dados_usuario += f"\n- Turno: {turno}"
+    dados_usuario += f"\n- Transporte: {transporte_labels.get(transporte, transporte)}"
+
+    eh_pro_user = db.is_pro(user["chat_id"])
+
+    if transporte == "sou" and eh_pro_user:
+        regras_onibus = (
+            "Regras sobre ônibus:\n"
+            "- TODOS os horários estão na TABELA COMPLETA DE HORÁRIOS abaixo\n"
+            "- NUNCA invente horários ou rotas — use SOMENTE os dados fornecidos\n"
+            "- CRÍTICO: cada ROTA tem ORIGEM e DESTINO fixos. NUNCA sugira ônibus de uma rota com destino diferente do pedido\n\n"
+            "FORMATAÇÃO (OBRIGATÓRIO — siga À RISCA):\n"
+            "- Links do Maps SEMPRE em markdown: [texto](url) — NUNCA cole URL crua\n"
+            "- Ao mencionar ônibus, SEMPRE use este formato exato, com quebra de linha entre cada bloco:\n\n"
+            "🚌 L.XXX — HH:MM → HH:MM\n"
+            "📍 Embarque: endereço\n"
+            "[📍 Rota a pé](URL_DO_MAPS)\n\n"
+            "- NUNCA liste ônibus em texto corrido. SEMPRE use o formato de bloco acima\n"
+            "- Máximo 3 opções de ônibus, a menos que peçam mais"
+        )
+        tabela_horarios = "\n\n========== TABELA COMPLETA DE HORÁRIOS ==========\n" + _TABELA_HORARIOS
+    elif transporte == "sou" and not eh_pro_user:
+        regras_onibus = (
+            f"Horários de ônibus (/onibus) é recurso EXCLUSIVO Pro. "
+            f"Se {nome} perguntar sobre ônibus, diga que é recurso Pro e sugira /assinar. "
+            "NUNCA forneça horários, rotas ou pontos de ônibus."
+        )
+        tabela_horarios = ""
+    else:
+        regras_onibus = (
+            f"{nome} NÃO usa ônibus SOU Americana "
+            f"(transporte: {transporte_labels.get(transporte, transporte)}). "
+            "Se perguntar sobre ônibus SOU, informe que o comando /onibus é específico para SOU Americana."
+        )
+        tabela_horarios = ""
 
     return f"""\
 Você é o FAMus, assistente pessoal de {nome} no Telegram. {nome} é estudante na FAM (Faculdade de Americana).
@@ -312,32 +396,18 @@ Personalidade:
 
 Dados acadêmicos:
 - Notas e faltas de {nome} estão no CONTEXTO ATUAL abaixo (quando disponíveis)
-- Use esses dados para responder perguntas sobre notas, faltas, média, situação acadêmica
-- Se não houver dados de notas/faltas no contexto, sugira usar /notas ou /faltas
+- DPs (matérias reprovadas) também estão no contexto quando disponíveis
+- Fórmula FAM: MS = média ponderada de N1, N2, N3. MS >= 6.0 = aprovado direto. MS < 6.0 = precisa de AR. MF = (MS + AR) / 2, precisa MF >= 5.0
+- Se não houver dados no contexto, sugira usar /notas ou /dp
+- SIMULAÇÃO de notas (quanto precisa pra passar) é recurso EXCLUSIVO Pro. Se tiver dados de simulação no contexto, use-os. Se NÃO tiver, NUNCA calcule por conta própria — diga que é recurso Pro e sugira /simular ou /assinar
 
-Regras sobre ônibus:
-- TODOS os horários estão na TABELA COMPLETA DE HORÁRIOS abaixo
-- NUNCA invente horários ou rotas — use SOMENTE os dados fornecidos
-- CRÍTICO: cada ROTA tem ORIGEM e DESTINO fixos. NUNCA sugira ônibus de uma rota com destino diferente do pedido
-
-FORMATAÇÃO (OBRIGATÓRIO — siga À RISCA):
-- Links do Maps SEMPRE em markdown: [texto](url) — NUNCA cole URL crua
-- Ao mencionar ônibus, SEMPRE use este formato exato, com quebra de linha entre cada bloco:
-
-🚌 L.XXX — HH:MM → HH:MM
-📍 Embarque: endereço
-[📍 Rota a pé](URL_DO_MAPS)
-
-- NUNCA liste ônibus em texto corrido. SEMPRE use o formato de bloco acima
-- Máximo 3 opções de ônibus, a menos que peçam mais
+{regras_onibus}
 
 Grade semanal:
 {grade_text}
 
-Comandos disponíveis: /aula, /onibus, /atividades, /notas, /faltas, /grade, /config, /help, /clear
-
-========== TABELA COMPLETA DE HORÁRIOS ==========
-""" + _TABELA_HORARIOS
+Comandos disponíveis: /aula, /notas (1x/semana Free, ilimitado Pro), /onibus (Pro), /faltas (Pro), /grade, /atividades (Pro), /simular (Pro), /dp (Pro), /assinar, /plano, /config, /help, /clear, /resetar
+""" + tabela_horarios
 
 
 def _formatar_para_telegram(texto: str) -> str:
@@ -502,10 +572,25 @@ def _perguntar_gemini(mensagem: str, chat_id: int, extra_contexto: str | None) -
 # ── Interface pública ──────────────────────────────────────────────────────
 
 def perguntar(mensagem: str, chat_id: int = 0, extra_contexto: str | None = None) -> str | None:
-    """Tenta Groq primeiro, Gemini como fallback."""
+    """Tenta Groq primeiro, Gemini como fallback. Respeita limite Free."""
+    # Checa limite de IA para usuários Free
+    if chat_id:
+        from monitor import checar_limite_ia, incrementar_ia
+        bloqueado, restantes = checar_limite_ia(chat_id)
+        if bloqueado:
+            return (
+                "⭐ Você atingiu o limite de 5 mensagens IA por dia (plano Free).\n"
+                "Use /assinar pra desbloquear IA ilimitada (R$ 9,90/mês)."
+            )
+
     resposta = _perguntar_groq(mensagem, chat_id, extra_contexto)
     if resposta:
+        if chat_id:
+            incrementar_ia(chat_id)
         return resposta
 
     logger.info("Groq falhou, tentando Gemini como fallback...")
-    return _perguntar_gemini(mensagem, chat_id, extra_contexto)
+    resposta = _perguntar_gemini(mensagem, chat_id, extra_contexto)
+    if resposta and chat_id:
+        incrementar_ia(chat_id)
+    return resposta
